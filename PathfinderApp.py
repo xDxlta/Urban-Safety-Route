@@ -6,24 +6,28 @@ import folium
 from streamlit_folium import st_folium
 
 
+#------Risk logic------
+def compute_risk(data, is_night=False):
+    risk = 0
+
+    tunnel_value = data.get("tunnel")
+    highway = data.get("highway")
+
+    if tunnel_value in ["yes", "building_passage", "covered"]:
+        risk += 1.0
+
+    if highway in ["primary", "secondary"]:
+        risk += 2.0
+
+    return risk
+
 #Load the Graph and calculate the risk + cache it, because otherwise it takes over a minute to use the map
 @st.cache_resource
 def load_graph():
     G = ox.load_graphml("zurich_walk.graphml")
 
     for u, v, k, data in G.edges(keys=True, data=True):
-        tunnel_value = data.get("tunnel")
-        highway = data.get("highway")
-
-        risk = 0
-
-        if tunnel_value in ["yes", "building_passage", "covered"]:
-            risk += 1.0
-
-        if highway in ["primary", "secondary"]:
-            risk += 2.0
-
-        data["risk"] = risk
+        data["risk"] = compute_risk(data)
 
     return G
 G = load_graph()
