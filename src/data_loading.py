@@ -185,6 +185,26 @@ def build_place_coordinates(df: pd.DataFrame) -> pd.DataFrame:
     return places
 
 
+
+# We also need the city, to map it against its respective city graph on osm, to get the features we later use for our ML model. 
+#Extract one city/place name per image_id from left and right columns.
+#If the same image appears multiple times, keep the first observed city name.
+def build_image_cities(df: pd.DataFrame) -> pd.DataFrame:
+    
+    left_cities = df[["left", "place_name_left"]].copy()
+    left_cities.columns = ["image_id", "city_name"]
+
+    right_cities = df[["right", "place_name_right"]].copy()
+    right_cities.columns = ["image_id", "city_name"]
+
+    cities = pd.concat([left_cities, right_cities], ignore_index=True)
+
+    cities = cities.drop_duplicates()
+    cities = cities.groupby("image_id", as_index=False).first()
+
+    return cities
+
+
 # -------------------------------   PREPARING FOR MODEL TRAINING --------------------------------
 
 #Build base training table: place_id | lat | lon | score | comparisons | wins_equivalent
@@ -194,6 +214,7 @@ def build_training_base(df: pd.DataFrame) -> pd.DataFrame:
     scores_df = build_place_scores(df)
     elo_df = build_elo_scores(df)
     coords_df = build_place_coordinates(df)
+    cities_df = build_image_cities(df)
 
     #merge scores and coordinates on place_id to get the final training base with all required columns. We use an inner join to keep only place_ids that have both a score and coordinates, which should be the majority of them, but we might lose some if there are inconsistencies in the data
     training_base = scores_df.merge(coords_df, on="image_id", how="inner")
@@ -202,10 +223,15 @@ def build_training_base(df: pd.DataFrame) -> pd.DataFrame:
         on="image_id",
         how="inner"
     )
+    training_base = training_base.merge(
+        cities_df,
+        on="image_id",
+        how="inner"
+    )
 
     # Reorder columns, because I hate chaotic dataframes
     training_base = training_base[
-        ["image_id", "lat", "lon", "score", "elo_rating", "elo_score", "comparisons", "wins_equivalent"]
+        ["image_id", "city_name", "lat", "lon", "score", "elo_rating", "elo_score", "comparisons", "wins_equivalent"]
     ]
 
     return training_base
@@ -261,3 +287,11 @@ if __name__ == "__main__":
 
     print("\nHighest Elo scores:")
     print(training_base_df.sort_values("elo_score", ascending=False).head(10))
+    print("\nUnique cities:")
+    print(training_base_df["city_name"].nunique())
+
+    print("\nCity sample:")
+    print(training_base_df["city_name"].drop_duplicates().head(20).tolist())
+
+    print("\nTop city counts:")
+    print(training_base_df["city_name"].value_counts().head(20))
