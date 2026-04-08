@@ -94,7 +94,7 @@ def get_place_query(city_name: str):
 
     return custom_map.get(city_name, city_name)
 
-
+#Download the graph for a city if we dont have it cached, otherwise load from disk. Caching is important because OSMnx can be very slow to download and process graphs, especially for large cities. We save the graphs in GraphML format which preserves all the attributes we need.
 def get_graph_path(city_name: str) -> Path:
     safe_name = sanitize_city_name(city_name)
     return GRAPHS_DIR / f"{safe_name}.graphml"
@@ -117,6 +117,7 @@ def load_or_download_graph(city_name: str):
 
 
 # --------------------------- FEATURE HELPERS ---------------------------
+       
 
 def normalize_highway(value):
     if pd.isna(value):
@@ -131,6 +132,28 @@ def normalize_highway(value):
 
     return value
 
+def normalize_osm_value(value):
+    if pd.isna(value):
+        return None
+
+    value = str(value).strip()
+
+    # Falls OSMnx/Writing Listen als String speichert: "['yes', 'limited']"
+    if value.startswith("[") and value.endswith("]"):
+        value = value.strip("[]")
+        parts = [p.strip().strip("'").strip('"') for p in value.split(",")]
+        return parts[0].lower() if parts else None
+
+    return value.lower()
+
+
+def is_lit_feature(value):
+    value = normalize_osm_value(value)
+
+    # OSM lit-Werte, die echte Beleuchtung anzeigen
+    lit_positive = {"yes", "24/7", "automatic", "limited", "interval"}
+
+    return 1 if value in lit_positive else 0
 
 def to_numeric(value, default=0.0):
     if pd.isna(value):
@@ -182,7 +205,7 @@ def edge_to_features(edge_attrs: dict) -> dict:
         "edge_length": to_numeric(edge_attrs.get("length"), 0.0),
 
         "is_tunnel": 1 if str(tunnel) in ["yes", "building_passage", "covered"] else 0,
-        "is_lit": 1 if str(lit) == "yes" else 0,
+        "is_lit": is_lit_feature(lit),
         "is_bridge": 1 if str(bridge) == "yes" else 0,
         "is_oneway": is_oneway(oneway),
 
