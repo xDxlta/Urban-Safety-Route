@@ -22,6 +22,8 @@ df = feature_df.merge(context_df, on="image_id", how="left")
 
 print("Merged df shape:", df.shape)
 
+print(df[["is_lit", "has_sidewalk"]].mean())
+print(df[["is_lit", "has_sidewalk"]].value_counts())
 # -------------------------
 # DEFINE FEATURE GROUPS
 # -------------------------

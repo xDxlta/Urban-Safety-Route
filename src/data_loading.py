@@ -171,7 +171,6 @@ def build_place_coordinates(df: pd.DataFrame) -> pd.DataFrame:
 
     right_places = df[["right", "long_right", "lat_right"]].copy()
     right_places.columns = ["image_id", "lat", "lon"]
-
     #...concatenate them together, so we dont seperate left and right (because a place can appear in the left row and afterwards in the right row)
     places = pd.concat([left_places, right_places], ignore_index=True)
 
