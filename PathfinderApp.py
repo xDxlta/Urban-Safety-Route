@@ -1,94 +1,171 @@
 import streamlit as st
 import osmnx as ox
 import networkx as nx
-import pydeck as pdk
 import folium
 from streamlit_folium import st_folium
-
-
-#------Risk logic------
-def compute_risk(data, is_night=False):
-    risk = 0
-
-    tunnel_value = data.get("tunnel")
-    highway = data.get("highway")
-
-    if tunnel_value in ["yes", "building_passage", "covered"]:
-        risk += 1.0
-
-    if highway in ["primary", "secondary"]:
-        risk += 2.0
-
-    return risk
-
-#Load the Graph and calculate the risk + cache it, because otherwise it takes over a minute to use the map
+import pandas as pd
+from pathlib import Path
+ 
+BASE_DIR = Path(__file__).resolve().parent
+PROCESSED_DIR = BASE_DIR / "Data" / "processed"
+ 
+ 
 @st.cache_resource
-def load_graph():
-    G = ox.load_graphml("zurich_walk.graphml")
-
+def load_graph_with_scores():
+    print("Loading graph...")
+    G = ox.load_graphml(BASE_DIR / "Data" / "graphs" / "Zurich.graphml")
+ 
+    scores_df = pd.read_csv(PROCESSED_DIR / "zurich_safety_scores.csv")
+    score_map = {
+        (row["u"], row["v"], row["k"]): row["safety_score_norm"]
+        for _, row in scores_df.iterrows()
+    }
+ 
     for u, v, k, data in G.edges(keys=True, data=True):
-        data["risk"] = compute_risk(data)
-
+        score = score_map.get((u, v, k), 0.5)
+        data["safety_score"] = score
+        data["risk"] = 1.0 - score
+ 
     return G
-G = load_graph()
-
-
-# Define a custom weight function that combines length and risk. TODO : Adjust the weight later, so that the risk is not overemphasized. Currently, it adds a large penalty to the length based on the risk, which may lead to very long detours for routes with any risk.
+ 
+ 
+G = load_graph_with_scores()
+ 
+ 
 def safe_weight(u, v, data):
     edge_data = min(data.values(), key=lambda x: x.get("length", float("inf")))
-    return edge_data.get("length", 0) + 10000 * edge_data.get("risk", 0)
-
-# Define a function to get the normal and safe routes between a start and end point. It uses the nearest nodes in the graph for the start and end coordinates, calculates the shortest path based on length for the normal route and based on the custom safe weight for the safe route, and converts these routes to GeoDataFrames.
+    length = edge_data.get("length", 0)
+    risk = edge_data.get("risk", 0.5)
+    return length * (1 + 10.0 * risk)
+ 
+ 
 def get_routes(start, end):
     orig = ox.distance.nearest_nodes(G, start[1], start[0])
     dest = ox.distance.nearest_nodes(G, end[1], end[0])
-
     route_normal = nx.shortest_path(G, orig, dest, weight="length")
     route_safe = nx.shortest_path(G, orig, dest, weight=safe_weight)
-
     route_normal_gdf = ox.routing.route_to_gdf(G, route_normal)
     route_safe_gdf = ox.routing.route_to_gdf(G, route_safe)
-
     return route_normal_gdf, route_safe_gdf
-
-st.title("Safety Routing Zurich")
-
+ 
+ 
+# --------------------------- UI ---------------------------
+ 
+st.title("Safety Routing Zürich")
+st.caption("Blau = kürzeste Route | Grün = sicherste Route")
+ 
 if "points" not in st.session_state:
     st.session_state.points = []
-
+ 
 if st.button("Reset"):
     st.session_state.points = []
     st.rerun()
-
-# Karte zuerst bauen
+ 
 m = folium.Map(location=[47.3769, 8.5417], zoom_start=13)
-
-# Bereits gesetzte Punkte anzeigen
+ 
 for i, point in enumerate(st.session_state.points):
     color = "green" if i == 0 else "red"
     label = "Start" if i == 0 else "Ziel"
-    folium.Marker(location=point, tooltip=label, icon=folium.Icon(color=color)).add_to(m)
-
-# Wenn 2 Punkte da sind, Route zeichnen
+    folium.Marker(location=point, tooltip=label,
+                  icon=folium.Icon(color=color)).add_to(m)
+ 
 if len(st.session_state.points) == 2:
     start, end = st.session_state.points
     route_normal_gdf, route_safe_gdf = get_routes(start, end)
-
+ 
     for _, row in route_normal_gdf.iterrows():
         coords = [(lat, lon) for lon, lat in row.geometry.coords]
-        folium.PolyLine(coords, color="blue", weight=3).add_to(m)
-
+        folium.PolyLine(coords, color="blue", weight=3,
+                        tooltip="Kürzeste Route").add_to(m)
+ 
     for _, row in route_safe_gdf.iterrows():
         coords = [(lat, lon) for lon, lat in row.geometry.coords]
-        folium.PolyLine(coords, color="red", weight=5).add_to(m)
-
-# Karte anzeigen
-map_data = st_folium(m, width=900, height=600)
-
-# Klick verarbeiten
+        folium.PolyLine(coords, color="green", weight=5,
+                        tooltip="Sicherste Route").add_to(m)
+ 
+    map_data = st_folium(m, width=700, height=600)
+ 
+    # --------------------------- SIDEBAR ---------------------------
+    with st.sidebar:
+        st.header("🔍 Routenvergleich")
+ 
+        scores_df = pd.read_csv(PROCESSED_DIR / "zurich_safety_scores.csv")
+ 
+        def get_route_stats(route_gdf):
+            merged = route_gdf.reset_index()
+            if "u" in merged.columns and "v" in merged.columns:
+                merged["k"] = merged.get("key", 0)
+                merged = merged.merge(scores_df, on=["u", "v", "k"], how="left")
+            return merged
+ 
+        normal_stats = get_route_stats(route_normal_gdf)
+        safe_stats = get_route_stats(route_safe_gdf)
+ 
+        normal_score = normal_stats["safety_score_norm"].mean()
+        safe_score = safe_stats["safety_score_norm"].mean()
+ 
+        st.metric("Ø Safety Score – Kürzeste Route", f"{normal_score:.2f}")
+        st.metric("Ø Safety Score – Sicherste Route", f"{safe_score:.2f}",
+                  delta=f"{safe_score - normal_score:+.2f}")
+ 
+        st.divider()
+        st.subheader("🚧 Was wurde vermieden?")
+ 
+        feature_labels = {
+            "is_tunnel":       "Tunnel",
+            "is_bridge":       "Brücken",
+            "highway_primary": "Hauptstrassen",
+            "highway_secondary": "Nebenstrassen",
+            "maxspeed":        "Hohe Geschwindigkeit",
+            "busy_road":       "Vielbefahrene Strassen",
+            "road_capacity":   "Hohe Strassenkapazität",
+            "dead_end":        "Sackgassen",
+            "is_oneway":       "Einbahnstrassen",
+            "has_sidewalk":    "Kein Gehsteig",
+        }
+ 
+        edge_feats = pd.read_csv(PROCESSED_DIR / "zurich_edge_features.csv")
+ 
+        def get_edge_feature_means(route_gdf):
+            merged = route_gdf.reset_index()
+            if "u" in merged.columns and "v" in merged.columns:
+                merged["k"] = merged.get("key", 0)
+                merged = merged.merge(edge_feats, on=["u", "v", "k"], how="left")
+            cols = [c for c in feature_labels.keys() if c in merged.columns]
+            return merged[cols].mean()
+ 
+        normal_feats = get_edge_feature_means(route_normal_gdf)
+        safe_feats = get_edge_feature_means(route_safe_gdf)
+ 
+        diff = normal_feats - safe_feats
+        if "has_sidewalk" in diff:
+            diff["has_sidewalk"] = safe_feats["has_sidewalk"] - normal_feats["has_sidewalk"]
+ 
+        top5 = diff.sort_values(ascending=False).head(5)
+ 
+        if top5.max() < 0.01:
+            st.write("Die Routen sind sehr ähnlich – kaum Unterschied.")
+        else:
+            for feat, val in top5.items():
+                if val > 0.01:
+                    label = feature_labels.get(feat, feat)
+                    st.write(f"✅ **{label}** weniger auf sicherer Route")
+ 
+else:
+    map_data = st_folium(m, width=700, height=600)
+ 
+    with st.sidebar:
+        st.header("📍 Anleitung")
+        st.write("1. Klicke auf die Karte um den **Startpunkt** zu setzen")
+        st.write("2. Klicke erneut um den **Zielpunkt** zu setzen")
+        st.write("3. Die Routen werden automatisch berechnet")
+        st.write("")
+        st.write("🔵 Blaue Linie = Kürzeste Route")
+        st.write("🟢 Grüne Linie = Sicherste Route")
+ 
+# --------------------------- KLICK HANDLER ---------------------------
 if map_data and map_data.get("last_clicked"):
     clicked = (map_data["last_clicked"]["lat"], map_data["last_clicked"]["lng"])
-
     if len(st.session_state.points) < 2:
         if len(st.session_state.points) == 0 or clicked != st.session_state.points[-1]:
             st.session_state.points.append(clicked)

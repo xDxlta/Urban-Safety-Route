@@ -95,6 +95,7 @@ def get_place_query(city_name: str):
         "Bratislava": "Bratislava, Slovakia",
         "Kiev": "Kyiv, Ukraine",
         "Helsinki": "Helsinki, Finland",
+        "Zurich": "Zurich, Switzerland",
     }
     return custom_map.get(city_name, city_name)
 

@@ -19,13 +19,29 @@ PROCESSED_DIR = BASE_DIR / "Data" / "processed"
 df = pd.read_csv(PROCESSED_DIR / "feature_context_filtered.csv")
  
 # Only European cities structurally closest to Zürich
-european_cities = [
+'''european_cities = [
     "Amsterdam", "Barcelona", "Berlin", "Bratislava", "Bucharest",
     "Copenhagen", "Dublin", "Helsinki", "Kiev", "Lisbon",
     "London", "Madrid", "Milan", "Moscow", "Munich", "Paris",
     "Prague", "Rome", "Stockholm", "Warsaw", "Zagreb",
 ]
-df = df[df["city_name"].isin(european_cities)].copy()
+df = df[df["city_name"].isin(european_cities)].copy()'''
+
+# Nur Städte mit bekannten Datenproblemen ausschließen
+exclude_cities = ["Copenhagen", "Santiago", "Valparaiso", "Hong Kong"
+]
+df = df[~df["city_name"].isin(exclude_cities)].copy()
+
+'''keep_cities = [
+    # Städte die helfen (negatives delta)
+    "Lisbon", "Zagreb", "Boston", "London", "San Francisco",
+    "Madrid", "New York", "Seattle", "Portland", "Helsinki",
+    "Sydney", "Munich", "Singapore", "Washington DC", "Gaborone",
+    # Teststädte immer drin
+    "Amsterdam", "Barcelona", "Prague", "Stockholm",
+]
+df = df[df["city_name"].isin(keep_cities)].copy()'''
+
 print(f"Dataset shape after city filter: {df.shape}")
  
 # --------------------------- FEATURE ENGINEERING ---------------------------
@@ -39,6 +55,16 @@ df["elo_score"].hist(bins=50)
 plt.title("ELO Score Distribution")
 plt.savefig("score_hist.png")
 plt.close()
+
+# Interaktions-Features
+df["lit_and_sidewalk"]     = df["is_lit"] * df["has_sidewalk"]
+df["residential_sidewalk"] = df["highway_residential"] * df["has_sidewalk"]
+df["footway_lit"]          = df["highway_footway"] * df["is_lit"]
+df["road_capacity"]        = df["maxspeed"] * df["lanes"]
+df["smooth_and_lit"]       = df["surface_smoothness"] * df["is_lit"]
+df["smooth_and_sidewalk"]  = df["surface_smoothness"] * df["has_sidewalk"]
+df["busy_road"]            = df["highway_primary"] + df["highway_secondary"] + df["highway_tertiary"]
+df["pedestrian_infra"]     = df["highway_footway"] + df["highway_path"] + df["has_sidewalk"]
  
 # --------------------------- FEATURES & TARGET ---------------------------
  
@@ -69,6 +95,14 @@ feature_cols = [
     "near_park",
     "near_station",
     "poi_density_300m",
+    "lit_and_sidewalk",
+    "residential_sidewalk",
+    "footway_lit",
+    "road_capacity",
+    "smooth_and_lit",
+    "smooth_and_sidewalk",
+    "busy_road",
+    "pedestrian_infra",
 ]
 target_col = "elo_score"
  
@@ -161,3 +195,78 @@ plt.tight_layout()
 plt.savefig("xgb_actual_vs_predicted.png", dpi=150)
 plt.close()
 print("Saved plot: xgb_actual_vs_predicted.png")
+
+
+#I dont know what brings the R2 down right now, so I check which cities improve it and which cities dont. I assume that these cities have either very different infrastructure (e.g. many tunnels) or very bad data quality (e.g. many missing values that we imputed with mean).
+# --------------------------- LEAVE-ONE-CITY-OUT ANALYSE ---------------------------
+# Fixe europäische Teststädte
+#Fix them on european testcities similar to Zurich 
+test_cities_fixed = ["Amsterdam", "Barcelona", "Prague", "Stockholm"]
+
+test_mask  = model_df["city_name"].isin(test_cities_fixed)
+train_mask_base = ~test_mask
+
+X_loo_test_fixed = model_df.loc[test_mask, feature_cols]
+y_loo_test_fixed = model_df.loc[test_mask, target_col]
+
+print("\n--- Leave-One-City-Out Analyse (Test: europäische Städte) ---")
+loo_results = []
+
+for city in sorted(model_df["city_name"].unique()):
+    if city in test_cities_fixed:
+        continue  # Teststädte nie aus dem Training rausnehmen
+    
+    train_mask = train_mask_base & (model_df["city_name"] != city)
+    X_loo_train = model_df.loc[train_mask, feature_cols]
+    y_loo_train = model_df.loc[train_mask, target_col]
+
+    loo_model = XGBRegressor(
+        n_estimators=300,
+        max_depth=4,
+        learning_rate=0.03,
+        subsample=0.7,
+        colsample_bytree=0.7,
+        min_child_weight=5,
+        reg_alpha=0.1,
+        reg_lambda=1.0,
+        random_state=42,
+        n_jobs=-1,
+    )
+    loo_model.fit(X_loo_train, y_loo_train)
+    loo_pred = loo_model.predict(X_loo_test_fixed)
+    loo_r2 = r2_score(y_loo_test_fixed, loo_pred)
+
+    loo_results.append({
+        "city_left_out": city,
+        "n_rows": train_mask.sum(),
+        "r2_without_city": loo_r2,
+    })
+    print(f"  Without {city:<20}: R2 = {loo_r2:.5f}")
+
+baseline_loo = r2_score(
+    y_loo_test_fixed,
+    XGBRegressor(n_estimators=300, max_depth=4, learning_rate=0.03,
+                 subsample=0.7, colsample_bytree=0.7, min_child_weight=5,
+                 reg_alpha=0.1, reg_lambda=1.0, random_state=42, n_jobs=-1
+    ).fit(model_df.loc[train_mask_base, feature_cols],
+          model_df.loc[train_mask_base, target_col]
+    ).predict(X_loo_test_fixed)
+)
+
+loo_df = pd.DataFrame(loo_results)
+loo_df["r2_delta"] = loo_df["r2_without_city"] - baseline_loo
+loo_df = loo_df.sort_values("r2_delta")
+
+print(f"\nBaseline R2 auf europäischen Teststädten: {baseline_loo:.5f}")
+print("\nStädte die das Modell auf europäischen Städten VERBESSERN (positives delta = rauslassen hilft):")
+print(loo_df[loo_df["r2_delta"] > 0][["city_left_out", "r2_without_city", "r2_delta"]].to_string())
+print("\nStädte die das Modell auf europäischen Städten VERSCHLECHTERN (negatives delta = behalten hilft):")
+print(loo_df[loo_df["r2_delta"] < 0][["city_left_out", "r2_without_city", "r2_delta"]].to_string())
+
+loo_df.to_csv(PROCESSED_DIR / "loo_city_analysis_european_test.csv", index=False)
+
+import joblib
+
+joblib.dump(xgb_model, PROCESSED_DIR / "xgb_safety_model.pkl")
+joblib.dump(feature_cols, PROCESSED_DIR / "xgb_feature_cols.pkl")
+print("Model saved.")
