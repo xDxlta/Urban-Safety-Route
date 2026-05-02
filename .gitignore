@@ -1,0 +1,9 @@
+Data/
+*.csv
+__pycache__/
+*.pyc
+*.png
+*.jpg
+*.jpeg
+*.graphml
+cache/
