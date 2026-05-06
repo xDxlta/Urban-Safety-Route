@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from pyproj import Transformer
 from geopy.geocoders import Nominatim
+from streamlit_js_eval import get_geolocation
 
 
 #API to determine whether it is day or night, ChatGPT helped finding an API
@@ -37,6 +38,14 @@ PROCESSED_DIR = BASE_DIR / "Data" / "processed"
 SETTINGS_FILE = BASE_DIR / "user_settings.json"
 
 WALKING_SPEED_KMH = 4.5
+
+# Approximate bounding box of the city of Zürich (lat_min, lat_max, lon_min, lon_max)
+ZURICH_BOUNDS = (47.32, 47.435, 8.44, 8.625)
+
+
+def is_in_zurich(lat, lon):
+    lat_min, lat_max, lon_min, lon_max = ZURICH_BOUNDS
+    return lat_min <= lat <= lat_max and lon_min <= lon <= lon_max
 
 
 def load_user_settings():
@@ -169,8 +178,32 @@ def distance_to_minutes(dist_km):
 
 @st.cache_data(ttl=3600)
 def geocode_address(address):
+    if not address or not address.strip():
+        return None
     geolocator = Nominatim(user_agent="pathfinder_app")
-    location = geolocator.geocode(address)
+    # Bounding-Box für Zürich: SW- und NE-Ecke als (lat, lon)
+    lat_min, lat_max, lon_min, lon_max = ZURICH_BOUNDS
+    viewbox = [(lat_min, lon_min), (lat_max, lon_max)]
+
+    location = None
+    # 1) Direkt auf Zürich beschränkt suchen
+    try:
+        location = geolocator.geocode(
+            address, viewbox=viewbox, bounded=True, country_codes="ch"
+        )
+    except Exception:
+        location = None
+
+    # 2) Fallback: Stadt explizit anhängen, falls nicht schon enthalten
+    if location is None and "zürich" not in address.lower() and "zurich" not in address.lower():
+        try:
+            location = geolocator.geocode(
+                f"{address}, Zürich, Schweiz",
+                viewbox=viewbox, bounded=True, country_codes="ch",
+            )
+        except Exception:
+            location = None
+
     if location:
         return (location.latitude, location.longitude)
     return None
@@ -181,6 +214,11 @@ def geocode_address(address):
 #!!!Edit here for UI changes!!! Das meiste ist mit KI erstellt, damit wir etwas funktionierendes testen können. Gestaltet das schöner, das ist alles webpart
 
 st.title("Pathfinder – Safety Routing Zürich")
+
+map_tiles = "OpenStreetMap"
+legend_bg = "white"
+legend_text = "#111"
+legend_border = "#888"
 
 user_settings = load_user_settings()
 
@@ -195,47 +233,38 @@ if "emergency_police_point" not in st.session_state:
     st.session_state.emergency_police_point = None
 if "show_info" not in st.session_state:
     st.session_state.show_info = False
+if "show_safety_tips" not in st.session_state:
+    st.session_state.show_safety_tips = False
+if "geo_request" not in st.session_state:
+    st.session_state.geo_request = None
 
-# ---- Sidebar: Settings & Input ----
+# Einheitliche Fehlermeldung für Punkte ausserhalb der Stadt Zürich
+ZURICH_BOUNDS_ERROR = (
+    "Der ausgewählte Punkt liegt ausserhalb der Stadt Zürich, "
+    "bitte einen Start-und Endpunkt innerhalb der Stadtgrenzen wählen"
+)
+
+# ---- Sidebar: Anleitung → Route planen → Homeadresse → Einstellungen ----
 with st.sidebar:
-    st.header("Einstellungen")
-
-    with st.expander("Einstellungen", expanded=False):
-        safety_weight = st.slider(
-            "Sicherheitsgewichtung",
-            min_value=1.0, max_value=30.0, value=10.0, step=0.5,
-            help="Höher = sichere Route weicht stärker von kürzester ab",
-        )
-
-        extra_distance = st.slider(
-            "Max. Umweg für Sicherheit (%)",
-            min_value=0, max_value=100, value=50, step=5,
-            help="Wie viel längere Strecke ist akzeptabel für mehr Sicherheit?",
-        )
-
-        show_fastest = st.toggle("Schnellste Route anzeigen", value=True)
-        show_safest = st.toggle("Sicherste Route anzeigen", value=True)
-
-        st.divider()
-        st.subheader("Home-Adresse")
-        home_addr = st.text_input(
-            "Home-Adresse speichern",
-            value=user_settings.get("home_address", ""),
-            placeholder="z.B. Bahnhofstrasse 1, Zürich",
-        )
-        if st.button("Home speichern"):
-            coords = geocode_address(home_addr)
-            if coords:
-                user_settings["home_address"] = home_addr
-                user_settings["home_lat"] = coords[0]
-                user_settings["home_lon"] = coords[1]
-                save_user_settings(user_settings)
-                st.success(f"Home gespeichert: {home_addr}")
-            else:
-                st.error("Adresse nicht gefunden.")
+    # 1. Anleitung
+    st.header("Anleitung")
+    st.write(
+        "Wähle **zwei Punkte direkt auf der Karte** – die Route wird automatisch berechnet."
+    )
+    st.write(
+        "**Oder** gib unter **Route planen** Start- und Zieladresse manuell ein und klicke auf *Route berechnen*."
+    )
 
     st.divider()
+
+    # 2. Route planen
     st.header("Route planen")
+
+    # Prefill-Werte aus vorigem Run anwenden, BEVOR die Text-Inputs gerendert werden
+    if "_prefill_start" in st.session_state:
+        st.session_state["start_addr_input"] = st.session_state.pop("_prefill_start")
+    if "_prefill_end" in st.session_state:
+        st.session_state["end_addr_input"] = st.session_state.pop("_prefill_end")
 
     start_address = st.text_input(
         "Startadresse",
@@ -245,9 +274,9 @@ with st.sidebar:
 
     col_s1, col_s2 = st.columns(2)
     with col_s1:
-        use_my_location = st.button("Mein Standort")
+        use_my_loc_start = st.button("Mein Standort", key="my_loc_start")
     with col_s2:
-        use_map_start = st.button("Karte (Start)")
+        use_home_start = st.button("Zuhause", key="home_start")
 
     end_address = st.text_input(
         "Zieladresse",
@@ -257,16 +286,21 @@ with st.sidebar:
 
     col_e1, col_e2 = st.columns(2)
     with col_e1:
-        use_home = st.button("Home als Ziel")
+        use_my_loc_end = st.button("Mein Standort", key="my_loc_end")
     with col_e2:
-        use_map_end = st.button("Karte (Ziel)")
+        use_home_end = st.button("Zuhause", key="home_end")
 
     if st.button("Route berechnen", type="primary", use_container_width=True):
         points = []
+        out_of_bounds = False
         if start_address:
             coords = geocode_address(start_address)
             if coords:
-                points.append(coords)
+                if not is_in_zurich(coords[0], coords[1]):
+                    st.error(ZURICH_BOUNDS_ERROR)
+                    out_of_bounds = True
+                else:
+                    points.append(coords)
             else:
                 st.error("Startadresse nicht gefunden.")
         elif len(st.session_state.points) >= 1:
@@ -275,30 +309,59 @@ with st.sidebar:
         if end_address:
             coords = geocode_address(end_address)
             if coords:
-                points.append(coords)
+                if not is_in_zurich(coords[0], coords[1]):
+                    st.error(ZURICH_BOUNDS_ERROR)
+                    out_of_bounds = True
+                else:
+                    points.append(coords)
             else:
                 st.error("Zieladresse nicht gefunden.")
         elif len(st.session_state.points) >= 2:
             points.append(st.session_state.points[1])
 
-        if len(points) == 2:
+        if len(points) == 2 and not out_of_bounds:
             st.session_state.points = points
             st.session_state.emergency_mode = False
             st.rerun()
 
-    if use_home:
-        if user_settings.get("home_lat"):
-            home_pt = (user_settings["home_lat"], user_settings["home_lon"])
-            if len(st.session_state.points) >= 1:
-                st.session_state.points = [st.session_state.points[0], home_pt]
-            else:
-                st.session_state.points = [
-                    st.session_state.points[0] if st.session_state.points else (47.3769, 8.5417),
-                    home_pt,
-                ]
-            st.rerun()
-        else:
-            st.warning("Bitte zuerst Home-Adresse in Einstellungen speichern.")
+    # ---- Zuhause als Start oder Ziel ----
+    def _set_home_point(slot):
+        """slot: 0 = Start, 1 = Ziel"""
+        if not user_settings.get("home_lat"):
+            st.warning("Bitte zuerst Home-Adresse speichern.")
+            return
+        home_pt = (user_settings["home_lat"], user_settings["home_lon"])
+        if not is_in_zurich(home_pt[0], home_pt[1]):
+            st.error(ZURICH_BOUNDS_ERROR)
+            return
+        pts = list(st.session_state.points)
+        other_slot = 1 - slot
+        if len(pts) > other_slot and pts[other_slot] == home_pt:
+            st.error("Start- und Zielpunkt sind identisch - bitte einen anderen Punkt wählen")
+            return
+        while len(pts) <= slot:
+            pts.append(home_pt)
+        pts[slot] = home_pt
+        st.session_state.points = pts[:2]
+        # Adressfeld vorbefüllen (wird beim nächsten Run vor dem Text-Input gesetzt)
+        home_addr_str = user_settings.get("home_address", "")
+        if home_addr_str:
+            prefill_key = "_prefill_start" if slot == 0 else "_prefill_end"
+            st.session_state[prefill_key] = home_addr_str
+        st.rerun()
+
+    if use_home_start:
+        _set_home_point(0)
+    if use_home_end:
+        _set_home_point(1)
+
+    # ---- "Mein Standort"-Buttons setzen Anfrage-Flag ----
+    if use_my_loc_start:
+        st.session_state.geo_request = "start"
+        st.rerun()
+    if use_my_loc_end:
+        st.session_state.geo_request = "end"
+        st.rerun()
 
     #This just resets the points
     if st.button("Reset", use_container_width=True):
@@ -307,6 +370,7 @@ with st.sidebar:
         st.session_state.emergency_route = None
         st.session_state.emergency_police_point = None
         st.session_state.show_info = False
+        st.session_state.geo_request = None
         st.rerun()
 
     st.divider()
@@ -329,31 +393,120 @@ with st.sidebar:
         else:
             st.warning("Bitte zuerst einen Standort setzen (Startpunkt).")
 
-# ---- Geolocation via JS ----
-if use_my_location:
-    from streamlit.components.v1 import html as st_html
+    # Platzhalter für den Routenvergleich – wird gefüllt sobald eine Route berechnet wurde
+    routenvergleich_container = st.container()
 
-    geo_js = """
-    <script>
-    navigator.geolocation.getCurrentPosition(
-        (pos) => {
-            const lat = pos.coords.latitude;
-            const lon = pos.coords.longitude;
-            window.parent.postMessage({type: 'geo', lat: lat, lon: lon}, '*');
-            document.getElementById('geo-result').innerText = lat + ',' + lon;
-        },
-        (err) => {
-            document.getElementById('geo-result').innerText = 'error';
-        }
-    );
-    </script>
-    <p id="geo-result" style="display:none;"></p>
-    """
-    st_html(geo_js, height=0)
-    st.info(
-        "Standort wird abgefragt... Falls der Browser fragt, bitte erlauben. "
-        "Alternativ: Adresse eingeben oder auf Karte klicken."
+    st.divider()
+
+    # 3. Homeadresse
+    st.header("Homeadresse")
+
+    # Prefill anwenden, bevor das Text-Input gerendert wird (z.B. nach Reset)
+    if "_prefill_home" in st.session_state:
+        st.session_state["home_addr_input"] = st.session_state.pop("_prefill_home")
+
+    home_addr = st.text_input(
+        "Home-Adresse",
+        value=user_settings.get("home_address", ""),
+        placeholder="z.B. Bahnhofstrasse 1, Zürich",
+        key="home_addr_input",
     )
+
+    home_col1, home_col2 = st.columns(2)
+    with home_col1:
+        save_home_clicked = st.button("Adresse speichern", use_container_width=True)
+    with home_col2:
+        reset_home_clicked = st.button("Reset", use_container_width=True, key="home_reset_btn")
+
+    if save_home_clicked:
+        coords = geocode_address(home_addr)
+        if coords:
+            if not is_in_zurich(coords[0], coords[1]):
+                st.error(ZURICH_BOUNDS_ERROR)
+            else:
+                user_settings["home_address"] = home_addr
+                user_settings["home_lat"] = coords[0]
+                user_settings["home_lon"] = coords[1]
+                save_user_settings(user_settings)
+                st.success(f"Home gespeichert: {home_addr}")
+        else:
+            st.error("Adresse nicht gefunden.")
+
+    if reset_home_clicked:
+        user_settings["home_address"] = ""
+        user_settings["home_lat"] = None
+        user_settings["home_lon"] = None
+        save_user_settings(user_settings)
+        st.session_state["_prefill_home"] = ""
+        st.rerun()
+
+    st.divider()
+
+    # 4. Einstellungen
+    with st.expander("Einstellungen", expanded=False):
+        # CSS um die Min/Max-Werte und Slider-Tooltips auszublenden
+        st.markdown(
+            """
+            <style>
+                div[data-testid="stExpander"] [data-testid="stSlider"] [data-testid="stTickBar"] { display: none !important; }
+                div[data-testid="stExpander"] [data-testid="stSlider"] [data-testid="stThumbValue"] { display: none !important; }
+                div[data-testid="stExpander"] [data-testid="stSlider"] [data-baseweb="tooltip"] { display: none !important; }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        def _qual_slider(label, key):
+            st.markdown(f"**{label}**")
+            val = st.slider(
+                label, min_value=1, max_value=10, value=5, step=1,
+                format=" ", label_visibility="collapsed", key=key,
+            )
+            col_l, col_r = st.columns(2)
+            col_l.caption("klein")
+            col_r.markdown(
+                "<div style='text-align:right; color:rgb(163,168,184); font-size:0.875em;'>hoch</div>",
+                unsafe_allow_html=True,
+            )
+            return val
+
+        # 1–10 (Slider) → in interne Wertebereiche umrechnen
+        sw_level = _qual_slider("Sicherheitsgewichtung", key="sw_slider")
+        safety_weight = 1.0 + (sw_level - 1) * (29.0 / 9.0)  # 1–10 → 1.0–30.0
+
+        ed_level = _qual_slider("Zusätzlicher Umweg für Sicherheit", key="ed_slider")
+        extra_distance = int(round((ed_level - 1) * (100.0 / 9.0)))  # 1–10 → 0–100
+
+        show_fastest = st.toggle("Schnellste Route anzeigen", value=True)
+        show_safest = st.toggle("Sicherste Route anzeigen", value=True)
+
+# ---- Geolocation: Browser-Standort abrufen, wenn angefordert ----
+if st.session_state.geo_request:
+    loc = get_geolocation()
+    if loc and isinstance(loc, dict) and loc.get("coords"):
+        coords = loc["coords"]
+        lat = coords.get("latitude")
+        lon = coords.get("longitude")
+        if lat is not None and lon is not None:
+            pt = (float(lat), float(lon))
+            slot = 0 if st.session_state.geo_request == "start" else 1
+            other_slot = 1 - slot
+            target = st.session_state.geo_request
+            st.session_state.geo_request = None  # Flag immer löschen
+            if not is_in_zurich(pt[0], pt[1]):
+                st.error(ZURICH_BOUNDS_ERROR)
+            else:
+                pts = list(st.session_state.points)
+                if len(pts) > other_slot and pts[other_slot] == pt:
+                    st.error("Start- und Zielpunkt sind identisch - bitte einen anderen Punkt wählen")
+                else:
+                    while len(pts) <= slot:
+                        pts.append(pt)
+                    pts[slot] = pt
+                    st.session_state.points = pts[:2]
+                    st.rerun()
+    else:
+        st.info("Standort wird abgefragt... Bitte im Browser erlauben.")
 
 # ---- Main Map ----
 # Zoom beibehalten nach Auswahl von Startpunkt: map centers on the route midpoint when both points are set
@@ -370,8 +523,8 @@ else:
     map_center = [47.3769, 8.5417]
     map_zoom = 13
 
-#Empty Folium Map centered on Zurich
-m = folium.Map(location=map_center, zoom_start=map_zoom)
+#Empty Folium Map centered on Zurich, theme depends on time of day
+m = folium.Map(location=map_center, zoom_start=map_zoom, tiles=map_tiles)
 
 #After being clicked, puts colored marker on the map
 for i, point in enumerate(st.session_state.points):
@@ -381,8 +534,47 @@ for i, point in enumerate(st.session_state.points):
         location=point, tooltip=label, icon=folium.Icon(color=color)
     ).add_to(m)
 
+# ---- Dauerhafter Zuhause-Marker, falls eine Home-Adresse gespeichert ist ----
+home_saved = user_settings.get("home_lat") is not None and user_settings.get("home_lon") is not None
+if home_saved:
+    folium.Marker(
+        location=(user_settings["home_lat"], user_settings["home_lon"]),
+        tooltip=f"Zuhause: {user_settings.get('home_address', '')}",
+        icon=folium.Icon(color="purple", icon="home", prefix="fa"),
+    ).add_to(m)
+
+# ---- Legende als HTML-Overlay direkt auf der Karte ----
+in_emergency = st.session_state.emergency_mode and st.session_state.emergency_route is not None
+emergency_legend = (
+    '<span style="background:#ff4136; width:22px; height:4px; display:inline-block; vertical-align:middle; margin-right:6px;"></span>Notfall-Route<br>'
+    '<span style="color:#0074d9; font-size:18px; margin-right:4px;">●</span>Polizeistation<br>'
+) if in_emergency else ""
+
+home_legend = (
+    '<span style="color:#9b59b6; font-size:18px; margin-right:4px;">⌂</span>Zuhause<br>'
+) if home_saved else ""
+
+legend_html = f"""
+<div style="position: absolute; bottom: 24px; left: 24px; width: 220px;
+            background-color: {legend_bg}; color: {legend_text};
+            border: 1px solid {legend_border}; z-index: 9999;
+            padding: 10px 12px; font-size: 13px; border-radius: 6px;
+            font-family: sans-serif; box-shadow: 0 2px 6px rgba(0,0,0,0.25);
+            line-height: 1.7;">
+  <b>Legende</b><br>
+  <span style="background:#3388ff; width:22px; height:4px; display:inline-block; vertical-align:middle; margin-right:6px;"></span>Kürzeste Route<br>
+  <span style="background:#2ecc40; width:22px; height:4px; display:inline-block; vertical-align:middle; margin-right:6px;"></span>Sicherste Route<br>
+  <span style="color:#2ecc40; font-size:18px; margin-right:4px;">●</span>Startpunkt<br>
+  <span style="color:#ff4136; font-size:18px; margin-right:4px;">●</span>Zielpunkt<br>
+  {home_legend}{emergency_legend}
+</div>
+"""
+m.get_root().html.add_child(folium.Element(legend_html))
+
 route_normal_gdf = None
 route_safe_gdf = None
+emergency_info = None
+route_info = None
 
 if st.session_state.emergency_mode and st.session_state.emergency_route is not None:
     eroute = st.session_state.emergency_route
@@ -400,12 +592,13 @@ if st.session_state.emergency_mode and st.session_state.emergency_route is not N
     dist_km = route_distance_km(eroute)
     dur_min = distance_to_minutes(dist_km)
 
+    map_data = st_folium(m, width=900, height=600, returned_objects=["last_clicked", "zoom", "center"])
+
+    # Notfall-Info unterhalb der Karte
     st.warning(
         f"NOTFALL-ROUTE zur nächsten Polizeistation: "
         f"{dist_km:.2f} km / ca. {dur_min:.0f} Min. zu Fuss"
     )
-
-    map_data = st_folium(m, width=900, height=600, returned_objects=["last_clicked", "zoom", "center"])
 
 elif len(st.session_state.points) == 2:
     start, end = st.session_state.points
@@ -418,12 +611,6 @@ elif len(st.session_state.points) == 2:
 
     extra_pct = ((dist_safe - dist_normal) / dist_normal * 100) if dist_normal > 0 else 0
 
-    if extra_pct > extra_distance and extra_distance > 0:
-        st.info(
-            f"Die sicherste Route ist {extra_pct:.0f}% länger als die kürzeste. "
-            f"Dein Limit liegt bei {extra_distance}%. Die Route wird auf dein Limit angepasst."
-        )
-
     #Draw the routes on the map, blue for shortest and green for safest
     if show_fastest:
         for _, row in route_normal_gdf.iterrows():
@@ -435,6 +622,15 @@ elif len(st.session_state.points) == 2:
             coords = [(lat, lon) for lon, lat in row.geometry.coords]
             folium.PolyLine(coords, color="green", weight=5, tooltip="Sicherste Route").add_to(m)
 
+    map_data = st_folium(m, width=900, height=600, returned_objects=["last_clicked", "zoom", "center"])
+
+    # ---- Infos UNTER der Karte ----
+    if extra_pct > extra_distance and extra_distance > 0:
+        st.info(
+            f"Die sicherste Route ist {extra_pct:.0f}% länger als die kürzeste. "
+            f"Dein Limit liegt bei {extra_distance}%. Die Route wird auf dein Limit angepasst."
+        )
+
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("Kürzeste Route", f"{dist_normal:.2f} km", f"ca. {dur_normal:.0f} Min.")
@@ -443,9 +639,7 @@ elif len(st.session_state.points) == 2:
     with col3:
         st.metric("Umweg", f"+{extra_pct:.0f}%", f"+{dur_safe - dur_normal:.0f} Min.")
 
-    map_data = st_folium(m, width=900, height=600, returned_objects=["last_clicked", "zoom", "center"])
-
-    # ---- Route comparison sidebar ----
+    # ---- Routenvergleich (in Sidebar-Container, zwischen Route planen und Einstellungen) ----
     scores_df = pd.read_csv(PROCESSED_DIR / "zurich_safety_scores.csv")
 
     def get_route_stats(route_gdf):
@@ -461,7 +655,7 @@ elif len(st.session_state.points) == 2:
     normal_score = normal_stats["safety_score_norm"].mean()
     safe_score = safe_stats["safety_score_norm"].mean()
 
-    with st.sidebar:
+    with routenvergleich_container:
         st.header("Routenvergleich")
         st.metric("Safety Score – Kürzeste", f"{normal_score:.2f}")
         st.metric(
@@ -469,22 +663,47 @@ elif len(st.session_state.points) == 2:
             delta=f"{safe_score - normal_score:+.2f}",
         )
 
-    # ---- Info button: why was the route rerouted ----
-    if st.button("Warum wurde die Route umgeleitet?"):
-        st.session_state.show_info = not st.session_state.show_info
+    # ---- Info-Buttons: Reroute-Begründung und Safety-Tipps ----
+    btn_col1, btn_col2 = st.columns(2)
+    with btn_col1:
+        if st.button("Warum wurde die Route umgeleitet?", use_container_width=True):
+            st.session_state.show_info = not st.session_state.show_info
+    with btn_col2:
+        if st.button("Sicher nach Hause – Tipps", use_container_width=True):
+            st.session_state.show_safety_tips = not st.session_state.show_safety_tips
+
+    if st.session_state.show_safety_tips:
+        with st.expander("Verhaltensregeln für eine sichere Heimreise", expanded=True):
+            st.markdown(
+                """
+                - **Grössere Personengruppen meiden** und nicht durch sie hindurchgehen
+                - **Nicht von Fremden ansprechen lassen** – freundlich, aber bestimmt weitergehen
+                - **Kopfhörer leise** lassen oder ganz abnehmen, um die Umgebung wahrzunehmen
+                - **Hauptstrassen und beleuchtete Wege** bevorzugen, dunkle Abkürzungen meiden
+                - **Wertgegenstände** (Handy, Schmuck, Portemonnaie) nicht offen tragen
+                - **Handy aufgeladen** und mit etwas Akku-Reserve dabeihaben
+                - **Vertrauensperson informieren** über Route und voraussichtliche Ankunftszeit
+                - **Selbstsicher gehen** – aufrechte Haltung, zielgerichteter Blick
+                - **Im Zweifel** in ein offenes Geschäft, Restaurant oder zur Polizei gehen
+                - **Notrufnummer 117** (Polizei) griffbereit halten
+                - Wenn dir jemand folgt: **Strassenseite wechseln** oder Umweg über belebte Gegend nehmen
+                - Bei akuter Gefahr: **laut um Hilfe rufen** und Aufmerksamkeit erzeugen
+                """
+            )
 
     if st.session_state.show_info:
-        feature_labels = {
-            "is_tunnel":         "Tunnel",
-            "is_bridge":         "Brücken",
-            "highway_primary":   "Hauptstrassen",
-            "highway_secondary": "Nebenstrassen",
-            "maxspeed":          "Hohe Geschwindigkeit",
-            "busy_road":         "Vielbefahrene Strassen",
-            "road_capacity":     "Hohe Strassenkapazität",
-            "dead_end":          "Sackgassen",
-            "is_oneway":         "Einbahnstrassen",
-            "has_sidewalk":      "Kein Gehsteig",
+        # Pro Feature: ("more on safe"-Phrase, "less on safe"-Phrase)
+        feature_phrases = {
+            "is_tunnel":         ("Mehr Tunnel",                   "Weniger Tunnel"),
+            "is_bridge":         ("Mehr Brücken",                  "Weniger Brücken"),
+            "highway_primary":   ("Mehr Hauptstrassen",            "Weniger Hauptstrassen"),
+            "highway_secondary": ("Mehr Nebenstrassen",            "Weniger Nebenstrassen"),
+            "maxspeed":          ("Höhere Geschwindigkeiten",      "Niedrigere Geschwindigkeiten"),
+            "busy_road":         ("Mehr vielbefahrene Strassen",   "Weniger vielbefahrene Strassen"),
+            "road_capacity":     ("Höhere Strassenkapazität",      "Niedrigere Strassenkapazität"),
+            "dead_end":          ("Mehr Sackgassen",               "Weniger Sackgassen"),
+            "is_oneway":         ("Mehr Einbahnstrassen",          "Weniger Einbahnstrassen"),
+            "has_sidewalk":      ("Mehr Gehweg",                   "Weniger Gehweg"),
         }
 
         edge_feats = pd.read_csv(PROCESSED_DIR / "zurich_edge_features.csv")
@@ -494,43 +713,57 @@ elif len(st.session_state.points) == 2:
             if "u" in merged.columns and "v" in merged.columns:
                 merged["k"] = merged.get("key", 0)
                 merged = merged.merge(edge_feats, on=["u", "v", "k"], how="left")
-            cols = [c for c in feature_labels.keys() if c in merged.columns]
+            cols = [c for c in feature_phrases.keys() if c in merged.columns]
             return merged[cols].mean()
 
         normal_feats = get_edge_feature_means(route_normal_gdf)
         safe_feats = get_edge_feature_means(route_safe_gdf)
 
-        diff = normal_feats - safe_feats
-        if "has_sidewalk" in diff:
-            diff["has_sidewalk"] = safe_feats["has_sidewalk"] - normal_feats["has_sidewalk"]
+        # diff > 0: sichere Route hat MEHR davon, diff < 0: sichere Route hat WENIGER davon
+        diff = safe_feats - normal_feats
+        threshold = 0.01
 
-        top5 = diff.sort_values(ascending=False).head(5)
+        # Top-Unterschiede nach Betrag sortieren
+        top = diff.abs().sort_values(ascending=False).head(5)
 
-        with st.expander("Routenanalyse – Vermiedene Gefahren", expanded=True):
-            if top5.max() < 0.01:
+        reasons = []
+        for feat in top.index:
+            val = diff[feat]
+            if abs(val) < threshold:
+                continue
+            more_phrase, less_phrase = feature_phrases.get(feat, (feat, feat))
+            reasons.append(more_phrase if val > 0 else less_phrase)
+
+        with st.expander("Routenanalyse – Gründe für die Umleitung", expanded=True):
+            if not reasons:
                 st.write("Die Routen sind sehr ähnlich – kaum Unterschied.")
             else:
-                for feat, val in top5.items():
-                    if val > 0.01:
-                        label = feature_labels.get(feat, feat)
-                        st.write(f"**{label}** – weniger auf sicherer Route")
+                st.markdown("**Die Route wurde umgeleitet, da:**")
+                for r in reasons:
+                    st.markdown(f"- {r}")
 
 else:
     map_data = st_folium(m, width=900, height=600, returned_objects=["last_clicked", "zoom", "center"])
 
-    with st.sidebar:
-        st.header("Anleitung")
-        st.write("1. Gib eine **Startadresse** ein oder klicke auf die Karte")
-        st.write("2. Gib eine **Zieladresse** ein oder nutze 'Home als Ziel'")
-        st.write("3. Klicke auf **Route berechnen**")
-        st.write("---")
-        st.write("Blau = Kürzeste Route")
-        st.write("Grün = Sicherste Route")
-
-# Klick handler
+# Klick handler – 1. Klick = Start, ab 2. Klick = Ziel (wird bei jedem weiteren Klick aktualisiert)
 if map_data and map_data.get("last_clicked"):
     clicked = (map_data["last_clicked"]["lat"], map_data["last_clicked"]["lng"])
-    if len(st.session_state.points) < 2:
-        if len(st.session_state.points) == 0 or clicked != st.session_state.points[-1]:
-            st.session_state.points.append(clicked)
+    if not is_in_zurich(clicked[0], clicked[1]):
+        st.error(ZURICH_BOUNDS_ERROR)
+    else:
+        pts = list(st.session_state.points)
+        if len(pts) == 0:
+            pts.append(clicked)
+            st.session_state.points = pts
             st.rerun()
+        elif len(pts) == 1:
+            if clicked != pts[0]:
+                pts.append(clicked)
+                st.session_state.points = pts
+                st.rerun()
+        else:
+            # Ab 3. Klick: Zielpunkt aktualisieren, Startpunkt bleibt
+            if clicked != pts[1]:
+                pts[1] = clicked
+                st.session_state.points = pts
+                st.rerun()
