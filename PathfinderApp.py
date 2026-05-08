@@ -1,4 +1,3 @@
-<<<<<<< Updated upstream
 
 import streamlit as st
 
