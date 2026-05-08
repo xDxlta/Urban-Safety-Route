@@ -5,7 +5,7 @@ import osmnx as ox
 
 
 # This code is responsible for taking the training base and building a feature table by looking up the nearest OSM edge for each point and extracting features from that edge and its nodes.
-# The resulting feature table will be saved as a CSV for use in model training.
+# The resulting feature table will be saved as a CSV for use in model training
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 PROCESSED_DIR = BASE_DIR / "Data" / "processed"
@@ -14,21 +14,21 @@ GRAPHS_DIR = BASE_DIR / "Data" / "graphs"
 GRAPHS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Set useful tags GLOBALLY so they apply to every graph download.
-# Must be at module level — not inside a function — so it is always active.
+#Must be at modul level so it is always active.
 ox.settings.useful_tags_way = [
     "highway", "oneway", "maxspeed", "lanes", "bridge", "tunnel",
     "lit", "sidewalk", "sidewalk:left", "sidewalk:right", "sidewalk:both",
     "footway", "surface", "width", "access", "junction", "service", "length",
 ]
 
-
+#load the training base from data_loading.py
 def load_training_base() -> pd.DataFrame:
     file_path = PROCESSED_DIR / "training_base.csv"
     df = pd.read_csv(file_path)
     return df
 
 
-# --------------------------- CITY / GRAPH HELPERS ---------------------------
+# first sanitize city names, so they can be used for getting the osmnx and file paths
 
 def sanitize_city_name(city_name: str) -> str:
     city_name = str(city_name).strip()
@@ -103,14 +103,14 @@ def get_graph_path(city_name: str) -> Path:
     safe_name = sanitize_city_name(city_name)
     return GRAPHS_DIR / f"{safe_name}.graphml"
 
-
+#download the graph for a city if it doesnt exist, otherwise load it from disk (SHORT RAGE COMMENT: We load it from disc to save time. I had to run this sh*t 4 times. 4 TIMES! And it crashed twice during the process. downloading every graph takes at least three hours, I even had to delete all graphs one time to get the right is_lit and has_sidewalk in, because I f***d up. I really dont want to see the energy bill this month... okay rage comment over, back to being professional). This way we dont have to redownload every time we run the feature engineering, which is very useful for development and also makes the process faster overall. We also add the safety scores and risk to the graph here, because we need them for the safe_weight function in model_training.py, which is used for training the model. We also consider if its currently night in zurich and if there are lamps nearby, because that can influence the risk perception of a place.
 def load_or_download_graph(city_name: str):
     graph_path = get_graph_path(city_name)
     if graph_path.exists():
         print(f"Loading cached graph for {city_name}")
         G = ox.load_graphml(graph_path)
         return G
-    print(f"Downloading graph for {city_name}")
+    print(f"Downloading graph for {city_name}") #These prints helped a TON to identify which cities are broken (some just didnt finished downloading lol)
     place_query = get_place_query(city_name)
     print(f"Place query used for {city_name}: {place_query}")
     G = ox.graph_from_place(place_query, network_type="walk")
@@ -118,8 +118,10 @@ def load_or_download_graph(city_name: str):
     return G
 
 
-# --------------------------- FEATURE HELPERS ---------------------------
+#These are the helper functions. I try to explain everything briefly and why we needed it and what didnt work without it. 
 
+
+#So the first one is required, because in OSMnx there were some streets with ambigous tags, which were represented by a list or an array instead of a single value, resulting in a "truth value of an array is ambiguous" error. So, if its a list or an array, we just return the first value. 
 def _safe_first(value):
 #Extract a single scalar from lists/arrays OSMnx may return for edge attributes
     import numpy as np
@@ -130,6 +132,7 @@ def _safe_first(value):
     return value
 
 
+#The highway values were sometimes strings, disguised as lists or arrays etc, but actually a string with brackets. This function normalizes them to a single string value. 
 def normalize_highway(value):
     value = _safe_first(value)
     if value is None:
@@ -147,6 +150,7 @@ def normalize_highway(value):
     return value
 
 
+#I tested with highway first and then applied it to everything else, so I know if only one feature is broken and not everything. Is this neccessary? Not sure, but I was too lazy to merge them, so I just copy pasted the code above. Also we put them to lower case, if its sometimes YES ands sometimes yes. 
 def normalize_osm_value(value):
     value = _safe_first(value)
     if value is None:
@@ -170,13 +174,13 @@ def osm_equals(value, valid_values):
         return 0
     return 1 if value in valid_values else 0
 
-
+#This was a pain in the ass, because is lit was always zero, bc we thought its only yes/no. Took a while to find out what the problem was, but it greatly improved our R2 and is now one of our most important features. 
 def is_lit_feature(value):
     value = normalize_osm_value(value)
     lit_positive = {"yes", "24/7", "automatic", "limited", "interval", "dusk-dawn", "sunrise-sunset"}
     return 1 if value in lit_positive else 0
 
-
+#we convert things like max speed to number to make them equal, sometimes they are 50 mph, sometimes '50' as a string, etc. I just realize that I dont know, if 50 kmh and 50 mph is the same now... Maybe I check on that later on.
 def to_numeric(value, default=0.0):
     value = _safe_first(value)
     if value is None:
@@ -197,7 +201,7 @@ def to_numeric(value, default=0.0):
     except Exception:
         return default
 
-
+# same as is lit. Was a pain in the ass to find this bug. 
 def has_sidewalk_tag(value):
 #Check OSM sidewalk=* tag on the road edge itself
     value = normalize_osm_value(value)
@@ -212,7 +216,7 @@ def is_oneway(value):
         return 0
     return 1 if value in {"yes", "true", "1", "-1", "reversible"} else 0
 
-
+#This was actually CLaudes suggestion. The idea was to improve our R2 based on the type of street because feeling safe has a lot to do if you walk next to a beautiful german concrete street or a rough mexican gravleroad. We convert different street types to a numeric score. But honestly it didnt improve our R2 that much. 
 def surface_to_smoothness(value):
     #Convert OSM surface tag to a numeric smoothness score. 0 = unknown/rough, 1 = medium (cobblestone etc), 2 = smooth (asphalt etc).Smoother surfaces correlate with more formal, maintained streets -> safer perception.
 

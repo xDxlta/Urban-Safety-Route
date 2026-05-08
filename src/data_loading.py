@@ -40,7 +40,8 @@ def clean_votes(df: pd.DataFrame) -> pd.DataFrame:
 
     #build one perceived-safety score per place_id: score = (wins + 0.5 * equals) / total_comparisons to account for places that are often compared but rarely win, and places that are often compared and often win. 
     #This gives us a score between 0 and 1 for each place_id, where 1 means it always wins, 0 means it never wins, and 0.5 means it wins as often as it loses (including ties
-    #NOW DONE ON IMAGE LEVEL (left/right columns)
+    #NOW DONE ON IMAGE LEVEL (left/right columns), because place id is actually only the city, instead image id is unique identifier for location
+    #actually we only use elo score now, see below, because its better, but I dont want to kick out normal score
 
 def build_place_scores(df: pd.DataFrame) -> pd.DataFrame:
     
@@ -64,7 +65,7 @@ def build_place_scores(df: pd.DataFrame) -> pd.DataFrame:
         total[left] += 1
         total[right] += 1
 
-        #Increment wins based on the choice. If left wins, increment left's wins. If right wins, increment right's wins. If it's a tie, increment both by 0.5.
+        #Increment wins based on the choice. If left wins, increment lefts wins. If right wins, increment rights wins. If it's a tie, increment both by 0.5.
         if choice == "left":
             wins[left] += 1.0
         elif choice == "right":
@@ -80,7 +81,7 @@ def build_place_scores(df: pd.DataFrame) -> pd.DataFrame:
         score = wins[pid] / comparisons if comparisons > 0 else None
         rows.append(
             {
-                "image_id": pid,
+                "image_id": pid, # we just changed this from place_id to image_id as mentioned above
                 "score": score,
                 "comparisons": comparisons,
                 "wins_equivalent": wins[pid],
@@ -93,7 +94,7 @@ def build_place_scores(df: pd.DataFrame) -> pd.DataFrame:
 #I had this great idea that our rating wasnt accurate enough, so I thought building an elo system for the scores like in chess could improve accuracy. Well, I guess I have too much time. The idea is to consider for unfair matchups, where a win against an unsafe place shouldnt count as much as a win against a safe one. 
 def build_elo_scores(df: pd.DataFrame, k_factor: float = 32.0, initial_rating: float = 1500.0) -> pd.DataFrame:
     
-    #Calculate Elo ratings for each image_id
+    #Calculate Elo ratings for each image_id, wins and total is given, so I use different variables (yes I got confused multiple times)
     ratings: dict[str, float] = {}
     comparisons: dict[str, int] = {}
 
@@ -111,7 +112,7 @@ def build_elo_scores(df: pd.DataFrame, k_factor: float = 32.0, initial_rating: f
         rating_left = ratings[left]
         rating_right = ratings[right]
 
-        #Expected scores based on current ratings
+        #Expected scores based on current ratings. CLaude gave me this formular, because I just couldnt get it right
         expected_left = 1 / (1 + 10 ** ((rating_right - rating_left) / 400))
         expected_right = 1 / (1 + 10 ** ((rating_left - rating_right) / 400))
 
@@ -136,7 +137,7 @@ def build_elo_scores(df: pd.DataFrame, k_factor: float = 32.0, initial_rating: f
         comparisons[right] += 1
 
     rows = []
-    for img in ratings:
+    for img in ratings: #Why the hell did we use img as variable name when we used pid before? To seperate further from the other score?
         rows.append(
             {
                 "image_id": img,
@@ -162,7 +163,7 @@ def build_elo_scores(df: pd.DataFrame, k_factor: float = 32.0, initial_rating: f
 
 #Extract one coordinate pair per place_id from left and right columns. If the same place_id appears multiple times, use the first observed coordinates (in case there are inconsistencies, which we hope are minimal, but you never know)
 #NOW DONE ON IMAGE LEVEL
-#In the raw data long and lat is switched, so we switch it back. THIS IS INTENTIONAL
+#In the raw data long and lat is switched, so we switch it back. THIS IS INTENTIONAL. I CHECKED IT FOR MULTIPLE CITIES. GUESS HOW LONG IT TOOK ME TO FIND THIS OUT, WHY THE HELL IT DIDNT WORK PROPERLY?
 
 def build_place_coordinates(df: pd.DataFrame) -> pd.DataFrame:
     
@@ -244,9 +245,9 @@ def save_processed_csv(df: pd.DataFrame, filename: str) -> None:
     print(f"Saved: {out_path}")
 
 
-# --------------------------- RUNNING THE PROCESS ---------------------------
+# --------------------------- RUNNING THE PROCESS (wohoo!) ---------------------------
 
-#run the whole process and save the final training base 
+#run the whole process and save the final training base. I used Claude to give me the prints and strings (otherwise I wouldnt know which number is which and I need them for error checking (there were multiple errors)), because its faster and tedious to do by hand. 
 if __name__ == "__main__":
     votes_df = load_votes()
     print("Raw shape:", votes_df.shape)

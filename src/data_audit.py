@@ -1,3 +1,6 @@
+#This program is essentially a data audit script that loads our processed features and context datasets to assess possible errors or mistakes, so we can improve our R2. We improved the R2 from -2% to 11%
+#Claude was heavily used during the creation of this script, especially later on, when we tried to ramp up the R2 from 5% to (ideally) 20% which we were not able to achieve (11% instead). 
+
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -21,6 +24,7 @@ df = feature_df.merge(context_df, on="image_id", how="left")
 
 print("Merged df shape:", df.shape)
 
+#has sidewalk and is lit seemed to be empty when we started. We found out they dont use yes/no, but "left"/"right" or "24/7", "evening" etc. (Or something like that, but it wasnt yes/no)
 print(df[["is_lit", "has_sidewalk"]].mean())
 print(df[["is_lit", "has_sidewalk"]].value_counts())
 
@@ -49,6 +53,7 @@ basic_feature_cols = [
     "dead_end",
 ]
 
+#Implemented them later on in a different script, so we dont have to run feature engineerung again, because it took hours to run, even when caching. (more in context_features.py)
 context_feature_cols = [
     "dist_to_park",
     "dist_to_station",
@@ -59,7 +64,7 @@ context_feature_cols = [
 
 all_feature_cols = basic_feature_cols + context_feature_cols
 
-# keep only columns that actually exist
+# keep only columns that actually exist just to double-check
 basic_feature_cols = [c for c in basic_feature_cols if c in df.columns]
 context_feature_cols = [c for c in context_feature_cols if c in df.columns]
 all_feature_cols = [c for c in all_feature_cols if c in df.columns]
@@ -124,7 +129,7 @@ for city_name, city_df in df.groupby("city_name"):
 
 audit_df = pd.DataFrame(rows).sort_values("city_name").reset_index(drop=True)
 
-# FLAG SUSPICIOUS CITIES
+#We flag suspicious cities to evaluate if they might be broken or damage our model, so we can remove them later on to improve R2
 audit_df["flag_high_basic_missing"] = audit_df["basic_missing_share"] > 0.05
 audit_df["flag_high_context_missing"] = audit_df["context_missing_share"] > 0.05
 audit_df["flag_high_total_missing"] = audit_df["all_missing_share"] > 0.05
@@ -152,8 +157,7 @@ print(audit_df.loc[audit_df["flag_high_context_missing"], ["city_name", "n_rows"
 print("\n=== CITIES WITH HIGH TOTAL MISSING ===")
 print(audit_df.loc[audit_df["flag_high_total_missing"], ["city_name", "n_rows", "all_missing_share"]])
 
-# QUICK FILTERED DATASET TEST PREP
-# Cities you already suspect:
+# Taipei, Tokyo, Hong Kong were too large and we couldnt properly download their graphs. The other ones were broken with graphml files below 100KB which is a sign of broken graph downloads, so we removed them to improve R2
 manual_bad_cities = [
     "Copenhagen",
     "Santiago",

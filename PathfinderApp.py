@@ -1,3 +1,5 @@
+<<<<<<< Updated upstream
+
 import streamlit as st
 
 st.set_page_config(page_title="Pathfinder – Safe Routing", layout="wide")
@@ -130,7 +132,6 @@ def safe_weight_with_factor(u, v, data, factor=10.0):
     length = edge_data.get("length", 0)
     risk = edge_data.get("risk", 0.5)
     return length * (1 + factor * risk)  # Thats our weight, the factor can be adjusted via slider
-#!!! NOAH: You can use this to implement a slider, so the user can adjust the weight themself !!!'''
 
 
 def get_routes(start, end, safety_factor=10.0):
@@ -211,7 +212,6 @@ def geocode_address(address):
 
 # --------------------------- UI ---------------------------
 
-#!!!Edit here for UI changes!!! Das meiste ist mit KI erstellt, damit wir etwas funktionierendes testen können. Gestaltet das schöner, das ist alles webpart
 
 st.title("Pathfinder – Safety Routing Zürich")
 
@@ -766,4 +766,5 @@ if map_data and map_data.get("last_clicked"):
             if clicked != pts[1]:
                 pts[1] = clicked
                 st.session_state.points = pts
+>>>>>>> Stashed changes
                 st.rerun()
