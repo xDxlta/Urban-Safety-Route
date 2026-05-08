@@ -1,0 +1,15 @@
+streamlit
+osmnx
+networkx
+folium
+streamlit-folium
+pandas
+pyproj
+requests
+geopy
+streamlit-js-eval
+xgboost
+joblib
+geopandas
+numpy
+scikit-learn

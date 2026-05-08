@@ -1,9 +1,22 @@
-Data/
-*.csv
+# Große Trainingsdaten ausschließen
+Data/archive/
+Data/processed/
+Data/graphs/
+
+# Nur die für Deployment benötigten Dateien explizit erlauben
+!Data/graphs/Zurich.graphml
+!Data/processed/zurich_safety_scores.csv
+!Data/processed/zurich_edge_features.csv
+!Data/processed/ewz.ewz_brennstelle_p.csv
+
+# Python cache
 __pycache__/
 *.pyc
+
+# Bilder
 *.png
 *.jpg
 *.jpeg
-*.graphml
+
+# Cache
 cache/
