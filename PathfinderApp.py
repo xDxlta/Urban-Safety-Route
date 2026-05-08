@@ -765,5 +765,4 @@ if map_data and map_data.get("last_clicked"):
             if clicked != pts[1]:
                 pts[1] = clicked
                 st.session_state.points = pts
->>>>>>> Stashed changes
                 st.rerun()
