@@ -4,7 +4,7 @@ import pandas as pd
 import osmnx as ox
 import geopandas as gpd
 
-
+#This is part 2 of feature engineering, where we added new features, we didnt add during the first run. For shorter waiting times, we didnt delete our downloaded OSM data, but redownload the new features and added them to te rest
 BASE_DIR = Path(__file__).resolve().parent.parent
 PROCESSED_DIR = BASE_DIR / "Data" / "processed"
 CITY_CONTEXT_DIR = PROCESSED_DIR / "context_city_files"
@@ -14,12 +14,12 @@ def load_feature_table() -> pd.DataFrame:
     file_path = PROCESSED_DIR / "feature_full_multicity.csv"
     return pd.read_csv(file_path)
 
-
+#we start the same as in feature engineering
 def sanitize_city_name(city_name: str) -> str:
     city_name = str(city_name).strip()
     city_name = re.sub(r"[^A-Za-z0-9]+", "_", city_name)
     return city_name.strip("_")
-
+#equivalent to the function get_graph_path from feature engineering
 def get_city_context_path(city_name: str) -> Path:
     safe_name = sanitize_city_name(city_name)
     return CITY_CONTEXT_DIR / f"{safe_name}_context.csv"
@@ -94,16 +94,16 @@ def get_place_query(city_name: str):
     }
     return custom_map.get(city_name, city_name)
 
-
+#transforms the dataframe with the coords in a geodataframe
 def get_city_points_gdf(city_df: pd.DataFrame) -> gpd.GeoDataFrame:
     gdf = gpd.GeoDataFrame(
         city_df.copy(),
         geometry=gpd.points_from_xy(city_df["lon"], city_df["lat"]),
-        crs="EPSG:4326"
+        crs="EPSG:4326" #thats the coordinate system used by osm
     )
     return gdf
 
-
+#We just download some context features that could be helpful like parks or train stations
 def get_osm_context_layers(city_name: str):
     place_query = get_place_query(city_name)
     print(f"Downloading OSM context features for {city_name} using query: {place_query}")
@@ -123,9 +123,9 @@ def get_osm_context_layers(city_name: str):
         "public_transport": True,
     }
 
-    try:
+    try: #get the parks, stations and pois
         parks = ox.features_from_place(place_query, park_tags)
-    except Exception as e:
+    except Exception as e: #return empty gdf if there are no parks, stations and pois
         print(f"No parks for {city_name}: {e}")
         parks = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
 
@@ -148,17 +148,20 @@ def prepare_context_gdf(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     if gdf is None or gdf.empty:
         return gpd.GeoDataFrame(geometry=[], crs="EPSG:3857")
 
+#kick out broken geometries
     gdf = gdf.copy()
     gdf = gdf[gdf.geometry.notna()].copy()
     gdf = gdf[gdf.geometry.is_empty == False].copy()
 
+#in case everything got kicked out now:
     if gdf.empty:
         return gpd.GeoDataFrame(geometry=[], crs="EPSG:3857")
 
+#only keep geometry not useless data like shopowner or parkname
     gdf = gdf[["geometry"]].copy()
-    gdf = gdf.to_crs(epsg=3857)
+    gdf = gdf.to_crs(epsg=3857) #transform to metric system for distance calculations. Otherwise gps normally uses degree system i think?
 
-    # Polygone/Lines -> Centroid
+    # parks are usually saved as polynoms, stations can be lines or polygons I think. So we take the center of these so we have one point. This means that the distance to a park might be in reality shorter, but this way its easier to calculate
     gdf["geometry"] = gdf.geometry.centroid
     gdf = gdf.reset_index(drop=True)
 
@@ -169,7 +172,7 @@ def add_context_features_for_city(city_df: pd.DataFrame) -> pd.DataFrame:
     city_name = city_df["city_name"].iloc[0]
     print(f"\nProcessing context features for {city_name} | rows: {len(city_df)}")
 
-    # Wenn schon gespeichert -> direkt laden
+    # instantly load when context already exist
     existing = load_existing_city_context(city_name)
     if existing is not None:
         return existing
@@ -178,10 +181,10 @@ def add_context_features_for_city(city_df: pd.DataFrame) -> pd.DataFrame:
         city_df.copy(),
         geometry=gpd.points_from_xy(city_df["lon"], city_df["lat"]),
         crs="EPSG:4326"
-    ).to_crs(epsg=3857)
+    ).to_crs(epsg=3857) #from gps convert to metric system for distance calculations (I used chatGPT for the exact epsg numbers)
 
     points_gdf = points_gdf.reset_index(drop=True)
-    points_gdf["point_id"] = points_gdf.index
+    points_gdf["point_id"] = points_gdf.index #changes the index to point_id
 
     parks, stations, pois = get_osm_context_layers(city_name)
 
@@ -195,20 +198,19 @@ def add_context_features_for_city(city_df: pd.DataFrame) -> pd.DataFrame:
     points_gdf["near_station"] = 0
     points_gdf["poi_count_300m"] = 0
 
-    # ---------- nearest park ----------
-    if not parks_gdf.empty:
-        joined_parks = gpd.sjoin_nearest(
+    #The following will be done for parks, stations and pois, but I will only comment the first one
+    if not parks_gdf.empty: #only do if there are parks, otherwise let the distance remain at 9999 
+        joined_parks = gpd.sjoin_nearest( #for every point look for the nearest park and add distance
             points_gdf[["point_id", "geometry"]],
             parks_gdf[["geometry"]],
             how="left",
             distance_col="dist_to_park"
         )
-        joined_parks = joined_parks.sort_values("dist_to_park").drop_duplicates(subset="point_id")
+        joined_parks = joined_parks.sort_values("dist_to_park").drop_duplicates(subset="point_id") #if multiple parks are nearby keep only the closest one and if multiple have the same distance take the first one
         park_dist_map = joined_parks.set_index("point_id")["dist_to_park"]
-        points_gdf["dist_to_park"] = points_gdf["point_id"].map(park_dist_map).fillna(9999.0)
-        points_gdf["near_park"] = (points_gdf["dist_to_park"] <= 300).astype(int)
+        points_gdf["dist_to_park"] = points_gdf["point_id"].map(park_dist_map).fillna(9999.0) #adds the distance to the nearest park to the points_gdf and if there is no park nearby fill it with 9999.0
+        points_gdf["near_park"] = (points_gdf["dist_to_park"] <= 300).astype(int) #we used 300 meters as threshold for being near a park, if the distance is smaller than 300m we set near_park to 1 otherwise to 0
 
-    # ---------- nearest station ----------
     if not stations_gdf.empty:
         joined_stations = gpd.sjoin_nearest(
             points_gdf[["point_id", "geometry"]],
@@ -221,7 +223,6 @@ def add_context_features_for_city(city_df: pd.DataFrame) -> pd.DataFrame:
         points_gdf["dist_to_station"] = points_gdf["point_id"].map(station_dist_map).fillna(9999.0)
         points_gdf["near_station"] = (points_gdf["dist_to_station"] <= 300).astype(int)
 
-    # ---------- POI count in 300m ----------
     if not pois_gdf.empty:
         poi_join = gpd.sjoin_nearest(
             points_gdf[["point_id", "geometry"]],
@@ -244,23 +245,23 @@ def add_context_features_for_city(city_df: pd.DataFrame) -> pd.DataFrame:
 
     result_df = pd.DataFrame(points_gdf[result_cols])
 
-    # SOFORT pro Stadt speichern
+    # immediatly safe the context features for the city. Downlaoding takes a while and I couldnt have my pc running that long with stable internet so I wanted to safe in between and not loose everything
     out_path = get_city_context_path(city_name)
     result_df.to_csv(out_path, index=False)
     print(f"Saved city context: {out_path}")
 
     return result_df
 
-
+#This works the same as in feature engineering 
 def build_context_features_all_cities(df: pd.DataFrame) -> pd.DataFrame:
     city_results = []
 
     for city_name, city_df in df.groupby("city_name"):
-        # Problemstädte erstmal skippen
+        # Skip problem cities again
         if city_name in ["Taipei", "Tokyo", "Hong Kong", "Valparaiso"]:
             print(f"Skipping {city_name} for now")
             continue
-
+        
         try:
             context_df = add_context_features_for_city(city_df.copy())
             city_results.append(context_df)

@@ -2,9 +2,10 @@ from pathlib import Path
 import pandas as pd
 import sys
 
-# Füge src zum Path hinzu damit wir feature_engineering importieren können
+# Add the parent directory to the path to import feature_engineering, so we can use the functions we defined there for zurichs feature extraction
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+#A friend told me about this trick, we can import the functions from our programs, like they are packages
 from feature_engineering import (
     load_or_download_graph,
     edge_to_features,
@@ -20,10 +21,10 @@ PROCESSED_DIR = BASE_DIR / "Data" / "processed"
 def build_zurich_edge_features():
     print("Loading Zürich graph...")
     G = load_or_download_graph("Zurich")
-    
+    #load the graph for zurich
     print(f"Zürich: nodes={len(G.nodes)}, edges={len(G.edges)}")
     
-    # Alle Edges mit Features extrahieren
+    # We exctract the features for each edge. We dont have coordinates we map onto the graph anymore, but we need the features for every edge, so we can predict all the safety scores
     rows = []
     for u, v, k, data in G.edges(keys=True, data=True):
         try:
@@ -33,12 +34,14 @@ def build_zurich_edge_features():
         except Exception as e:
             feats = NULL_FEATS.copy()
         
+        #We match the features with the edge identifiers so we can access them later
         rows.append({
             "u": u,
             "v": v,
             "k": k,
             **feats
         })
+        
     
     df = pd.DataFrame(rows)
     print(f"Edge feature table shape: {df.shape}")

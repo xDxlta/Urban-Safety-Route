@@ -36,11 +36,10 @@ def clean_votes(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# -----------------------    SCORE BUILDING AREA   -----------------------
 
     #build one perceived-safety score per place_id: score = (wins + 0.5 * equals) / total_comparisons to account for places that are often compared but rarely win, and places that are often compared and often win. 
     #This gives us a score between 0 and 1 for each place_id, where 1 means it always wins, 0 means it never wins, and 0.5 means it wins as often as it loses (including ties
-    #NOW DONE ON IMAGE LEVEL (left/right columns), because place id is actually only the city, instead image id is unique identifier for location
+    #NOW DONE ON IMAGE LEVEL (left/right columns), because place id is actually only the city, instead image id is unique identifier for location. I may sometimes refer to it as place_id in the comments, but its all image_id and should work properly
     #actually we only use elo score now, see below, because its better, but I dont want to kick out normal score
 
 def build_place_scores(df: pd.DataFrame) -> pd.DataFrame:
@@ -58,8 +57,8 @@ def build_place_scores(df: pd.DataFrame) -> pd.DataFrame:
         #Ensure both place_ids are in the wins and total dictionaries, initializing if necessary
         for pid in (left, right):
             if pid not in wins:
-                wins[pid] = 0.0
-                total[pid] = 0
+                wins[pid] = 0.0 #we use string for wins because 0.5 for ties, just in case you wondered
+                total[pid] = 0 #thats total comparisons, you cant compare .5 times so int
 
         #Increment total comparisons for both place_ids since they were compared in this row
         total[left] += 1
@@ -159,8 +158,6 @@ def build_elo_scores(df: pd.DataFrame, k_factor: float = 32.0, initial_rating: f
 
     return elo_df
 
-#------------------------  COORDINATE AREA -----------------------
-
 #Extract one coordinate pair per place_id from left and right columns. If the same place_id appears multiple times, use the first observed coordinates (in case there are inconsistencies, which we hope are minimal, but you never know)
 #NOW DONE ON IMAGE LEVEL
 #In the raw data long and lat is switched, so we switch it back. THIS IS INTENTIONAL. I CHECKED IT FOR MULTIPLE CITIES. GUESS HOW LONG IT TOOK ME TO FIND THIS OUT, WHY THE HELL IT DIDNT WORK PROPERLY?
@@ -179,7 +176,6 @@ def build_place_coordinates(df: pd.DataFrame) -> pd.DataFrame:
     #remove exact dupes
     places = places.drop_duplicates()
 
-    #If same place_id appears multiple times with same coords, keep one
     #if same place_id appears with slightly inconsistent coords, keep first for now, because then we have no chance in finding the "true" coords, so we just pray inconsistencies are minimal, but you never know
     places = places.groupby("image_id", as_index=False).first()
 
@@ -205,14 +201,10 @@ def build_image_cities(df: pd.DataFrame) -> pd.DataFrame:
 
     return cities
 
-
-# -------------------------------   PREPARING FOR MODEL TRAINING --------------------------------
-
-#Build base training table: place_id | lat | lon | score | comparisons | wins_equivalent
-#NOW: image_id | lat | lon | score ...
+#Build base training table
 
 def build_training_base(df: pd.DataFrame) -> pd.DataFrame:
-    scores_df = build_place_scores(df)
+    scores_df = build_place_scores(df) # dont need that anymore but used it during testing to check if elo score or normal score is better
     elo_df = build_elo_scores(df)
     coords_df = build_place_coordinates(df)
     cities_df = build_image_cities(df)
@@ -230,7 +222,7 @@ def build_training_base(df: pd.DataFrame) -> pd.DataFrame:
         how="inner"
     )
 
-    # Reorder columns, because I hate chaotic dataframes
+    # Reorder columns, so for once everything is ordered
     training_base = training_base[
         ["image_id", "city_name", "lat", "lon", "score", "elo_rating", "elo_score", "comparisons", "wins_equivalent"]
     ]
@@ -243,9 +235,6 @@ def save_processed_csv(df: pd.DataFrame, filename: str) -> None:
     out_path = PROCESSED_DIR / filename
     df.to_csv(out_path, index=False)
     print(f"Saved: {out_path}")
-
-
-# --------------------------- RUNNING THE PROCESS (wohoo!) ---------------------------
 
 #run the whole process and save the final training base. I used Claude to give me the prints and strings (otherwise I wouldnt know which number is which and I need them for error checking (there were multiple errors)), because its faster and tedious to do by hand. 
 if __name__ == "__main__":

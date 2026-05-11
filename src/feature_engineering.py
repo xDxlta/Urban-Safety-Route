@@ -218,7 +218,7 @@ def is_oneway(value):
 
 #This was actually CLaudes suggestion. The idea was to improve our R2 based on the type of street because feeling safe has a lot to do if you walk next to a beautiful german concrete street or a rough mexican gravleroad. We convert different street types to a numeric score. But honestly it didnt improve our R2 that much. 
 def surface_to_smoothness(value):
-    #Convert OSM surface tag to a numeric smoothness score. 0 = unknown/rough, 1 = medium (cobblestone etc), 2 = smooth (asphalt etc).Smoother surfaces correlate with more formal, maintained streets -> safer perception.
+    #Convert OSM surface tag to a numeric smoothness score. 0 = unknown/rough, 1 = medium (cobblestone etc), 2 = smooth (asphalt etc).Smoother surfaces correlate with more formal, maintained streets -> safer perception (at least thats the idea)
 
     value = normalize_osm_value(value)
     if value is None:
@@ -234,11 +234,9 @@ def surface_to_smoothness(value):
         return 0
     return 0
 
-
-# --------------------------- GRAPH FEATURES ---------------------------
-
+#We get the features for all the edges and nodes in a graph
 def edge_to_features(edge_attrs: dict) -> dict:
-    highway  = normalize_highway(edge_attrs.get("highway"))
+    highway  = normalize_highway(edge_attrs.get("highway")) # Highway is more complex and important and can make troubles, so we normalized it. We didnt do this for the rest though
     tunnel   = edge_attrs.get("tunnel")
     lit      = edge_attrs.get("lit")
     bridge   = edge_attrs.get("bridge")
@@ -249,11 +247,13 @@ def edge_to_features(edge_attrs: dict) -> dict:
     surface  = edge_attrs.get("surface")
     width    = edge_attrs.get("width")
 
+    #This is special and gave me quite a headache. Because as I understood it (and it seems to work) sidewalk can be an edge attribute for a street, but it also can be a seperate edge. So we have to consider that here. Its difficult to explain properly, but otherwise it didnt work. 
     sidewalk       = edge_attrs.get("sidewalk")
     sidewalk_left  = edge_attrs.get("sidewalk:left")
     sidewalk_right = edge_attrs.get("sidewalk:right")
     sidewalk_both  = edge_attrs.get("sidewalk:both")
 
+#Here we use our helper functions to convert the tags to numbers to make them usable for the model
     is_tunnel_val  = osm_equals(tunnel, {"yes", "building_passage", "covered"})
     is_lit_val     = is_lit_feature(lit)
     is_bridge_val  = osm_equals(bridge, {"yes"})
@@ -262,6 +262,7 @@ def edge_to_features(edge_attrs: dict) -> dict:
     footway_sidewalk_val = osm_equals(footway, {"sidewalk"})
     footway_crossing_val = osm_equals(footway, {"crossing"})
 
+#as explained above, if there is any of the sideawalk tags we just return a 1. We dont care about the position of the sidewalk, just if theres one or not
     has_sidewalk_val = int(
         has_sidewalk_tag(sidewalk)
         or osm_equals(sidewalk_left,  {"yes", "separate"})
@@ -281,7 +282,7 @@ def edge_to_features(edge_attrs: dict) -> dict:
         "lanes":              to_numeric(lanes, 1.0),
         "width":              to_numeric(width, 0.0),
         "surface_smoothness": surface_to_smoothness(surface),
-        "highway_primary":     1 if highway == "primary"     else 0,
+        "highway_primary":     1 if highway == "primary"     else 0, #Here we do the one hot encoding (is that the name?) for the highway types. instead of giving the model the type, we have a column for every type and give back 1 or 0 (yes or no)
         "highway_secondary":   1 if highway == "secondary"   else 0,
         "highway_tertiary":    1 if highway == "tertiary"    else 0,
         "highway_residential": 1 if highway == "residential" else 0,
@@ -294,7 +295,7 @@ def edge_to_features(edge_attrs: dict) -> dict:
 
     return features
 
-
+#this checks for teh degree f the two end nodes of an edge. If either one is 1, this means its a deadend because theres only 1 edge to this node (being the edge we are coming from)
 def get_node_context_features(G, u, v):
     degree_u = G.degree[u]
     degree_v = G.degree[v]
@@ -306,7 +307,7 @@ def get_node_context_features(G, u, v):
         "dead_end":   1 if min(degree_u, degree_v) <= 1 else 0,
     }
 
-
+#this tracks from a given lan/long point the nearest edge and gives the two nodes of this edge and a key, in case these nodes are connected by multiple edges, so we can uniquely identify every street on the grid. 
 def get_nearest_edge_features(G, lat: float, lon: float) -> dict:
     u, v, k = ox.distance.nearest_edges(G, lon, lat)
     edge_attrs = G.get_edge_data(u, v, k)
@@ -315,10 +316,7 @@ def get_nearest_edge_features(G, lat: float, lon: float) -> dict:
     features.update(node_context)
     return features
 
-
-# --------------------------- MAIN FEATURE BUILDING ---------------------------
-
-# Null-feature dict for when extraction fails — must stay in sync with edge_to_features()
+# Null-feature dict for when extraction fails must stay in sync with edge_to_features() (This was a suggestion from Claude)
 NULL_FEATS = {
     "edge_length":         None,
     "is_tunnel":           None,
@@ -350,15 +348,17 @@ def build_feature_table_for_city(city_df: pd.DataFrame) -> pd.DataFrame:
     city_name = city_df["city_name"].iloc[0]
     print(f"\nProcessing city: {city_name} | rows: {len(city_df)}")
 
+#We download the city according to the function below (see line 107)
     G = load_or_download_graph(city_name)
 
     lons = city_df["lon"].tolist()
     lats = city_df["lat"].tolist()
-
+#We match the coordinate to the nearest edge according to this funciton
     edge_matches = ox.distance.nearest_edges(G, X=lons, Y=lats)
 
     feature_rows = []
-
+#we iterate through the rows of the city dataframe and extract the features for all the coordinates
+#To be more precise: We unpack the edges to their u, v and k values, then we get the edge and node features and combine
     for row, edge_match in zip(city_df.itertuples(index=False), edge_matches):
         try:
             u, v, k = edge_match
@@ -366,28 +366,31 @@ def build_feature_table_for_city(city_df: pd.DataFrame) -> pd.DataFrame:
             feats = edge_to_features(edge_attrs)
             node_context = get_node_context_features(G, u, v)
             feats.update(node_context)
+       #If the extraction fails, we catch the extraction and return null, so the whole city doesnt crash, but keeps the row and we proceed. Later on we kicked cities out with a high missing rate
         except Exception as e:
             print(f"Feature extraction failed for {city_name}, image_id={row.image_id}: {e}")
             feats = NULL_FEATS.copy()
 
         feature_rows.append({"image_id": row.image_id, **feats})
 
+#We merge the features with origjnal city dataframe. To check if the graphg is okay we print the number of nodes and edges (I think it was Valparaiso which had only a couple of edges, which we then dropped later on)
     features_df = pd.DataFrame(feature_rows)
     city_full_df = city_df.merge(features_df, on="image_id", how="left")
     print(f"{city_name}: nodes={len(G.nodes)}, edges={len(G.edges)}")
     return city_full_df
 
-
+#
 def build_feature_table_all_cities(training_base: pd.DataFrame) -> pd.DataFrame:
     city_dfs = []
-
+#we just add together all the cities in one dataframe
     for city_name, city_df in training_base.groupby("city_name"):
-        if city_name in ["Taipei", "Tokyo"]:
+        if city_name in ["Taipei", "Tokyo"]: # We skip Taipei and Tokyo because they were too big, resulting in getting stuck during download
             print(f"Skipping {city_name} for now")
             continue
         try:
             city_result = build_feature_table_for_city(city_df.copy())
             city_dfs.append(city_result)
+        #if broken we skip it. Tokyo and Taipei were too big not directly broken, so we didnt skip
         except Exception as e:
             print(f"Skipping city {city_name} due to error: {e}")
 
@@ -403,7 +406,7 @@ def save_features_csv(df: pd.DataFrame, filename: str) -> None:
     print(f"\nSaved: {out_path}")
 
 
-# --------------------------- RUN ---------------------------
+#run the whole process
 
 if __name__ == "__main__":
     training_base_df = load_training_base()

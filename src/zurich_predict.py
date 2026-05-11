@@ -17,21 +17,22 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 PROCESSED_DIR = BASE_DIR / "Data" / "processed"
 GRAPHS_DIR = BASE_DIR / "Data" / "graphs"
 
-# --------------------------- LOAD MODEL ---------------------------
+#load the results from our trained model
 print("Loading model...")
 xgb_model = joblib.load(PROCESSED_DIR / "xgb_safety_model.pkl")
 feature_cols = joblib.load(PROCESSED_DIR / "xgb_feature_cols.pkl")
 print(f"Feature cols: {feature_cols}")
 
-# --------------------------- LOAD EDGE FEATURES ---------------------------
+#load the features from the zurich graph from last step
 print("\nLoading Zürich edge features...")
 edges_df = pd.read_csv(PROCESSED_DIR / "zurich_edge_features.csv")
 print(f"Edge features shape: {edges_df.shape}")
 
-# --------------------------- CONTEXT FEATURES ---------------------------
+#build the context features for zurich
 print("\nBuilding context features for Zürich...")
 context_path = get_city_context_path("Zurich")
 
+#if it exists just load it, otherwise download it and save for next time
 if context_path.exists():
     print("Loading cached context for Zürich...")
     context_df = pd.read_csv(context_path)
@@ -42,7 +43,7 @@ else:
 
     # Build points GDF from edge midpoints
     edges_gdf = edges_gdf.to_crs(epsg=3857)
-    edges_gdf = edges_gdf.reset_index()  # u, v, key aus Index in Spalten
+    edges_gdf = edges_gdf.reset_index()  # u, v, key from index
     edges_gdf["geometry_mid"] = edges_gdf.geometry.interpolate(0.5, normalized=True)
     points_gdf = gpd.GeoDataFrame(
         edges_gdf[["u", "v", "key"]].copy(),
@@ -53,6 +54,7 @@ else:
 
     parks, stations, pois = get_osm_context_layers("Zurich")
 
+    #we do the same as in context_features, but just for zurich
     from context_features import prepare_context_gdf
     parks_gdf    = prepare_context_gdf(parks)
     stations_gdf = prepare_context_gdf(stations)
@@ -100,10 +102,9 @@ else:
 
 print(f"Context shape: {context_df.shape}")
 
-# --------------------------- MERGE ---------------------------
+#combine edge features with context features
 print("\nMerging features...")
-df = edges_df.merge(context_df, on=["u", "v", "k"] if "k" in context_df.columns else ["u", "v"],
-                    how="left")
+df = edges_df.merge(context_df, on=["u", "v", "k"] if "k" in context_df.columns else ["u", "v"], how="left")
 
 # Build derived features
 df["log_dist_park"]    = np.log1p(df["dist_to_park"].fillna(9999))
@@ -120,12 +121,12 @@ df["smooth_and_sidewalk"]  = df["surface_smoothness"] * df["has_sidewalk"]
 df["busy_road"]            = df["highway_primary"] + df["highway_secondary"] + df["highway_tertiary"]
 df["pedestrian_infra"]     = df["highway_footway"] + df["highway_path"] + df["has_sidewalk"]
 
-# --------------------------- PREDICT ---------------------------
+#Now we predict a safety score for all of the edges in the zurich graph using our trained model, and save the results to a csv for later use in the streamlit app
 print("\nPredicting safety scores...")
 X = df[feature_cols].fillna(0)
 df["safety_score"] = xgb_model.predict(X)
 
-# Normalize to 0-1
+# Normalize to 0-1 because we will later subtract this for a risk score that we use as a penalty for our routes
 min_s = df["safety_score"].min()
 max_s = df["safety_score"].max()
 df["safety_score_norm"] = (df["safety_score"] - min_s) / (max_s - min_s)
@@ -133,7 +134,7 @@ df["safety_score_norm"] = (df["safety_score"] - min_s) / (max_s - min_s)
 print(f"\nSafety score stats:")
 print(df["safety_score_norm"].describe())
 
-# --------------------------- SAVE ---------------------------
+#save everything
 out_cols = ["u", "v", "k", "safety_score", "safety_score_norm"]
 out_path = PROCESSED_DIR / "zurich_safety_scores.csv"
 df[out_cols].to_csv(out_path, index=False)

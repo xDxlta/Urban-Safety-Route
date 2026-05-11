@@ -9,16 +9,12 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.dummy import DummyRegressor
 from xgboost import XGBRegressor
  
-# --------------------------- PATHS ---------------------------
- 
 BASE_DIR = Path(__file__).resolve().parent.parent
 PROCESSED_DIR = BASE_DIR / "Data" / "processed"
  
-# --------------------------- LOAD & FILTER ---------------------------
- 
 df = pd.read_csv(PROCESSED_DIR / "feature_context_filtered.csv")
  
-# Only European cities structurally closest to Zürich
+# Only European cities structurally closest to Zürich. NOT ANYMORE
 '''european_cities = [
     "Amsterdam", "Barcelona", "Berlin", "Bratislava", "Bucharest",
     "Copenhagen", "Dublin", "Helsinki", "Kiev", "Lisbon",
@@ -27,7 +23,7 @@ df = pd.read_csv(PROCESSED_DIR / "feature_context_filtered.csv")
 ]
 df = df[df["city_name"].isin(european_cities)].copy()'''
 
-# Nur Städte mit bekannten Datenproblemen ausschließen
+# Exclude cities with data problems (broke down while downloading or only few kb)
 exclude_cities = ["Copenhagen", "Santiago", "Valparaiso", "Hong Kong"
 ]
 df = df[~df["city_name"].isin(exclude_cities)].copy()
@@ -44,19 +40,18 @@ df = df[df["city_name"].isin(keep_cities)].copy()'''
 
 print(f"Dataset shape after city filter: {df.shape}")
  
-# --------------------------- FEATURE ENGINEERING ---------------------------
- 
+ #log transaform distances, and density. WHY DO WE DO THIS HERE AND NOT IN CONTEXT FEATURES?
 df["log_dist_park"]    = np.log1p(df["dist_to_park"])
 df["log_dist_station"] = np.log1p(df["dist_to_station"])
 df["poi_density_300m"] = df["poi_count_300m"] / (np.pi * (300 ** 2))
  
-# Score distribution
+# Score distribution as plot for visualization reasons, you can find it in the folder
 df["elo_score"].hist(bins=50)
 plt.title("ELO Score Distribution")
 plt.savefig("score_hist.png")
 plt.close()
 
-# Interaktions-Features
+# We tried interactions features (Interaktionsfeatures) to improve the model but they didnt helped a lot
 df["lit_and_sidewalk"]     = df["is_lit"] * df["has_sidewalk"]
 df["residential_sidewalk"] = df["highway_residential"] * df["has_sidewalk"]
 df["footway_lit"]          = df["highway_footway"] * df["is_lit"]
@@ -65,8 +60,6 @@ df["smooth_and_lit"]       = df["surface_smoothness"] * df["is_lit"]
 df["smooth_and_sidewalk"]  = df["surface_smoothness"] * df["has_sidewalk"]
 df["busy_road"]            = df["highway_primary"] + df["highway_secondary"] + df["highway_tertiary"]
 df["pedestrian_infra"]     = df["highway_footway"] + df["highway_path"] + df["has_sidewalk"]
- 
-# --------------------------- FEATURES & TARGET ---------------------------
  
 feature_cols = [
     "edge_length",
@@ -113,15 +106,14 @@ print(f"Missing values:\n{model_df[feature_cols].isna().sum()}")
 X = model_df[feature_cols]
 y = model_df[target_col]
  
-# --------------------------- TRAIN / TEST SPLIT ---------------------------
+#Train test split. we keep 20% for testing
  
 X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.2, random_state=42
 )
 print(f"\nTrain shape: {X_train.shape}")
 print(f"Test shape:  {X_test.shape}")
- 
-# --------------------------- DUMMY BASELINE ---------------------------
+
  
 dummy = DummyRegressor(strategy="mean")
 dummy.fit(X_train, y_train)
@@ -131,8 +123,8 @@ print("\n--- Dummy (mean) ---")
 print(f"MAE:  {mean_absolute_error(y_test, dummy_pred):.5f}")
 print(f"RMSE: {np.sqrt(mean_squared_error(y_test, dummy_pred)):.5f}")
 print(f"R2:   {r2_score(y_test, dummy_pred):.5f}")
- 
-# --------------------------- XGBOOST ---------------------------
+
+#We tried random forest, logistic regression and xgboost but xgboost outperformed the other models (which makes sense) so we only continued with this one
  
 xgb_model = XGBRegressor(
     n_estimators=500,
@@ -184,7 +176,7 @@ results_df["residual"]  = results_df[target_col] - results_df["predicted"]
 results_df.to_csv(PROCESSED_DIR / "xgb_predictions.csv", index=False)
 print(f"Saved predictions to: {PROCESSED_DIR / 'xgb_predictions.csv'}")
  
-# Residual plot
+# Residual plot (doesnt look good)
 plt.figure(figsize=(8, 5))
 plt.scatter(results_df[target_col], results_df["predicted"], alpha=0.3, s=5)
 plt.plot([0, 1], [0, 1], "r--", linewidth=1)
@@ -197,9 +189,8 @@ plt.close()
 print("Saved plot: xgb_actual_vs_predicted.png")
 
 
-#I dont know what brings the R2 down right now, so I check which cities improve it and which cities dont. I assume that these cities have either very different infrastructure (e.g. many tunnels) or very bad data quality (e.g. many missing values that we imputed with mean).
-# --------------------------- LEAVE-ONE-CITY-OUT ANALYSE ---------------------------
-# Fixe europäische Teststädte
+#I dont know what brings the R2 down right now, so I check which cities improve it and which cities dont. I assume that these cities have either very different infrastructure (e.g. many tunnels) or very bad data quality 
+# Leave one out city analysis
 #Fix them on european testcities similar to Zurich 
 test_cities_fixed = ["Amsterdam", "Barcelona", "Prague", "Stockholm"]
 
@@ -209,12 +200,12 @@ train_mask_base = ~test_mask
 X_loo_test_fixed = model_df.loc[test_mask, feature_cols]
 y_loo_test_fixed = model_df.loc[test_mask, target_col]
 
-print("\n--- Leave-One-City-Out Analyse (Test: europäische Städte) ---")
+print("\nLeave-One-City-Out Analyse (Test: europäische Städte)")
 loo_results = []
 
 for city in sorted(model_df["city_name"].unique()):
     if city in test_cities_fixed:
-        continue  # Teststädte nie aus dem Training rausnehmen
+        continue  # never take test cities out
     
     train_mask = train_mask_base & (model_df["city_name"] != city)
     X_loo_train = model_df.loc[train_mask, feature_cols]
@@ -258,9 +249,9 @@ loo_df["r2_delta"] = loo_df["r2_without_city"] - baseline_loo
 loo_df = loo_df.sort_values("r2_delta")
 
 print(f"\nBaseline R2 auf europäischen Teststädten: {baseline_loo:.5f}")
-print("\nStädte die das Modell auf europäischen Städten VERBESSERN (positives delta = rauslassen hilft):")
+print("\nStädte die das Modell auf europäischen Städten verbessern (positives delta = rauslassen hilft):")
 print(loo_df[loo_df["r2_delta"] > 0][["city_left_out", "r2_without_city", "r2_delta"]].to_string())
-print("\nStädte die das Modell auf europäischen Städten VERSCHLECHTERN (negatives delta = behalten hilft):")
+print("\nStädte die das Modell auf europäischen Städten verschlechtern (negatives delta = behalten hilft):")
 print(loo_df[loo_df["r2_delta"] < 0][["city_left_out", "r2_without_city", "r2_delta"]].to_string())
 
 loo_df.to_csv(PROCESSED_DIR / "loo_city_analysis_european_test.csv", index=False)
