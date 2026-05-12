@@ -43,7 +43,7 @@ WALKING_SPEED_KMH = 4.5
 # Approximate bounding box of the city of Zürich (lat_min, lat_max, lon_min, lon_max)
 ZURICH_BOUNDS = (47.32, 47.435, 8.44, 8.625)
  
- 
+#Must be within these bounds
 def is_in_zurich(lat, lon):
     lat_min, lat_max, lon_min, lon_max = ZURICH_BOUNDS
     return lat_min <= lat <= lat_max and lon_min <= lon <= lon_max
@@ -117,49 +117,64 @@ def load_graph_with_scores():
         score = score_map.get((u, v, k), 0.5)
         data["safety_score"] = score
         data["risk"] = 1.0 - score
- 
+
     # Precompute lamp proximity per edge so we can boost risk on unlit edges at night.
     # We use edge midpoints and check whether any street lamp is within 40m.
+    # Result is cached as CSV so the expensive spatial join only runs once.
+    LAMP_CACHE = PROCESSED_DIR / "zurich_lamp_proximity.csv"
     try:
-        lamps_df = load_lamps()
-        lamps_gdf = gpd.GeoDataFrame(
-            lamps_df,
-            geometry=gpd.points_from_xy(lamps_df["lon"], lamps_df["lat"]),
-            crs="EPSG:4326"
-        ).to_crs(epsg=3857)
- 
-        _, edges_gdf = ox.graph_to_gdfs(G)
-        edges_gdf = edges_gdf.to_crs(epsg=3857).reset_index()
-        edges_gdf["midpoint"] = edges_gdf.geometry.interpolate(0.5, normalized=True)
- 
-        midpoints_gdf = gpd.GeoDataFrame(
-            edges_gdf[["u", "v", "key"]],
-            geometry=edges_gdf["midpoint"].values,
-            crs="EPSG:3857"
-        ).reset_index(drop=True)
- 
-        joined = gpd.sjoin_nearest(
-            midpoints_gdf,
-            lamps_gdf[["geometry"]],
-            how="left",
-            distance_col="lamp_dist"
-        ).drop_duplicates(subset=["u", "v", "key"])
- 
-        lamp_map = {
-            (row["u"], row["v"], row["key"]): row["lamp_dist"] <= 40
-            for _, row in joined.iterrows()
-        }
- 
+        if LAMP_CACHE.exists():
+            print("Loading cached lamp proximity...")
+            lamp_cache_df = pd.read_csv(LAMP_CACHE)
+            lamp_map = {
+                (row["u"], row["v"], row["key"]): bool(row["has_lamp"])
+                for _, row in lamp_cache_df.iterrows()
+            }
+        else:
+            print("Computing lamp proximity (first run, this takes a moment)...")
+            lamps_df = load_lamps()
+            lamps_gdf = gpd.GeoDataFrame(
+                lamps_df,
+                geometry=gpd.points_from_xy(lamps_df["lon"], lamps_df["lat"]),
+                crs="EPSG:4326"
+            ).to_crs(epsg=3857)
+
+            _, edges_gdf = ox.graph_to_gdfs(G)
+            edges_gdf = edges_gdf.to_crs(epsg=3857).reset_index()
+            edges_gdf["midpoint"] = edges_gdf.geometry.interpolate(0.5, normalized=True)
+
+            midpoints_gdf = gpd.GeoDataFrame(
+                edges_gdf[["u", "v", "key"]],
+                geometry=edges_gdf["midpoint"].values,
+                crs="EPSG:3857"
+            ).reset_index(drop=True)
+
+            joined = gpd.sjoin_nearest(
+                midpoints_gdf,
+                lamps_gdf[["geometry"]],
+                how="left",
+                distance_col="lamp_dist"
+            ).drop_duplicates(subset=["u", "v", "key"])
+
+            joined["has_lamp"] = joined["lamp_dist"] <= 40
+            joined[["u", "v", "key", "has_lamp"]].to_csv(LAMP_CACHE, index=False)
+            print(f"Saved lamp proximity cache: {LAMP_CACHE}")
+
+            lamp_map = {
+                (row["u"], row["v"], row["key"]): bool(row["has_lamp"])
+                for _, row in joined.iterrows()
+            }
+
         for u, v, k, data in G.edges(keys=True, data=True):
             data["has_lamp"] = bool(lamp_map.get((u, v, k), False))
- 
+
         print("Lamp proximity computed successfully.")
- 
+
     except Exception as e:
         print(f"Lamp loading failed, defaulting has_lamp=False: {e}")
         for u, v, k, data in G.edges(keys=True, data=True):
             data["has_lamp"] = False
- 
+
     return G
  
  
@@ -177,7 +192,7 @@ def safe_weight_with_factor(u, v, data, factor=10.0, night_mode=False):
  
     if night_mode and not edge_data.get("has_lamp", False):
         risk = min(1.0, risk * 1.5)  # 50% risk boost for unlit edges at night
- 
+
     return length * (1 + factor * risk)  # factor adjustable via slider
  
  
@@ -185,10 +200,10 @@ def get_routes(start, end, safety_factor=10.0):
     #Start and endpoint. Nearest node to the clickpoint because its rare to hit a node directly
     orig = ox.distance.nearest_nodes(G, start[1], start[0])
     dest = ox.distance.nearest_nodes(G, end[1], end[0])
- 
+
     # Check once whether it's currently night in Zürich – cached per hour
     night = is_night()
- 
+
     #Calculate the shortest path. First is normal with length, second uses our safe weight based on the risk.
     route_normal = nx.shortest_path(G, orig, dest, weight="length")
     route_safe = nx.shortest_path(
