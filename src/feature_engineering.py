@@ -379,7 +379,7 @@ def build_feature_table_for_city(city_df: pd.DataFrame) -> pd.DataFrame:
     print(f"{city_name}: nodes={len(G.nodes)}, edges={len(G.edges)}")
     return city_full_df
 
-#
+
 def build_feature_table_all_cities(training_base: pd.DataFrame) -> pd.DataFrame:
     city_dfs = []
 #we just add together all the cities in one dataframe

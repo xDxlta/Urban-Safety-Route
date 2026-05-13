@@ -14,29 +14,11 @@ PROCESSED_DIR = BASE_DIR / "Data" / "processed"
  
 df = pd.read_csv(PROCESSED_DIR / "feature_context_filtered.csv")
  
-# Only European cities structurally closest to Zürich. NOT ANYMORE
-'''european_cities = [
-    "Amsterdam", "Barcelona", "Berlin", "Bratislava", "Bucharest",
-    "Copenhagen", "Dublin", "Helsinki", "Kiev", "Lisbon",
-    "London", "Madrid", "Milan", "Moscow", "Munich", "Paris",
-    "Prague", "Rome", "Stockholm", "Warsaw", "Zagreb",
-]
-df = df[df["city_name"].isin(european_cities)].copy()'''
-
+# We tested only using european cities closest to Zurich, as well as wrote a code that tells us which cities improve the R2 and which make it worse, but both models performed worse then all cities (excluding the broken ones below)
 # Exclude cities with data problems (broke down while downloading or only few kb)
 exclude_cities = ["Copenhagen", "Santiago", "Valparaiso", "Hong Kong"
 ]
 df = df[~df["city_name"].isin(exclude_cities)].copy()
-
-'''keep_cities = [
-    # Städte die helfen (negatives delta)
-    "Lisbon", "Zagreb", "Boston", "London", "San Francisco",
-    "Madrid", "New York", "Seattle", "Portland", "Helsinki",
-    "Sydney", "Munich", "Singapore", "Washington DC", "Gaborone",
-    # Teststädte immer drin
-    "Amsterdam", "Barcelona", "Prague", "Stockholm",
-]
-df = df[df["city_name"].isin(keep_cities)].copy()'''
 
 print(f"Dataset shape after city filter: {df.shape}")
  
