@@ -1,6 +1,7 @@
+#During this script we used a lot of help from ChatGPT and CLaude for the frontend of this project, to improve the user experience and make it more interactive and visually appealing
 import streamlit as st
  
-st.set_page_config(page_title="Pathfinder – Safe Routing", layout="wide")
+st.set_page_config(page_title="Pathfinder - Safe Routing", layout="wide")
  
 import osmnx as ox
 import networkx as nx
@@ -48,13 +49,12 @@ def is_in_zurich(lat, lon):
     lat_min, lat_max, lon_min, lon_max = ZURICH_BOUNDS
     return lat_min <= lat <= lat_max and lon_min <= lon <= lon_max
  
- 
+#This is to save the users home adress via a json file, so they dont have to type it in every time. We also save the coordinates for easy access when they click the "home" button 
 def load_user_settings():
     if SETTINGS_FILE.exists():
         return json.loads(SETTINGS_FILE.read_text())
     return {"home_address": "", "home_lat": None, "home_lon": None}
- 
- 
+
 def save_user_settings(settings):
     SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
  
@@ -69,7 +69,7 @@ def load_lamps():
         on_bad_lines="skip"
     )
  
-    # only keep necessary columns
+    #only keep necessary columns
     df = df[["geometry"]].copy()
  
     # delete the missing values
@@ -106,7 +106,7 @@ def load_graph_with_scores():
     scores_df = pd.read_csv(PROCESSED_DIR / "zurich_safety_scores.csv")
  
     #dict with the safety scores for each edge, where the key is a tuple of (u, v, k) and the value is the safety score
-    # u and v are the nodes that the edge connects and k is the Key for multiple edges between the same nodes.
+    # u and v are the nodes that the edge connects and k is the Key for multiple edges between the same nodes
     score_map = {
         (row["u"], row["v"], row["k"]): row["safety_score_norm"]
         for _, row in scores_df.iterrows()
@@ -118,20 +118,20 @@ def load_graph_with_scores():
         data["safety_score"] = score
         data["risk"] = 1.0 - score
 
-    # Precompute lamp proximity per edge so we can boost risk on unlit edges at night.
-    # We use edge midpoints and check whether any street lamp is within 40m.
-    # Result is cached as CSV so the expensive spatial join only runs once.
+    #Precompute lamp proximity per edge so we can boost risk on unlit edges at night
+    #We use edge midpoints and check whether any street lamp is within 40m
+    #Result is cached as csv so the expensive spatial join only runs once
     LAMP_CACHE = PROCESSED_DIR / "zurich_lamp_proximity.csv"
     try:
         if LAMP_CACHE.exists():
-            print("Loading cached lamp proximity...")
+            print("Loading cached lamp proximity...") #we use this checks if its loading or downloading multiple times during our code as a test if the storing works fine. Other examples are the graph downloads
             lamp_cache_df = pd.read_csv(LAMP_CACHE)
             lamp_map = {
                 (row["u"], row["v"], row["key"]): bool(row["has_lamp"])
                 for _, row in lamp_cache_df.iterrows()
             }
         else:
-            print("Computing lamp proximity (first run, this takes a moment)...")
+            print("Computing lamp proximity...")
             lamps_df = load_lamps()
             lamps_gdf = gpd.GeoDataFrame(
                 lamps_df,
@@ -139,6 +139,7 @@ def load_graph_with_scores():
                 crs="EPSG:4326"
             ).to_crs(epsg=3857)
 
+        #We take the midpoints of the edges to measure the distance between the lamps and the edges (because edges are lines). Its the same logic we used for parks and stations
             _, edges_gdf = ox.graph_to_gdfs(G)
             edges_gdf = edges_gdf.to_crs(epsg=3857).reset_index()
             edges_gdf["midpoint"] = edges_gdf.geometry.interpolate(0.5, normalized=True)
@@ -148,18 +149,18 @@ def load_graph_with_scores():
                 geometry=edges_gdf["midpoint"].values,
                 crs="EPSG:3857"
             ).reset_index(drop=True)
-
+        #Takes the closest lamp to each midpoint and calc ulates the distance
             joined = gpd.sjoin_nearest(
                 midpoints_gdf,
                 lamps_gdf[["geometry"]],
                 how="left",
                 distance_col="lamp_dist"
             ).drop_duplicates(subset=["u", "v", "key"])
-
+        #Again, we take 40m as the thrshold for being near a lamp or not being near a lamp. This is based on the idea that lamps within 40m should provide at least some illumination. There might be houses in between but we cant really account for that
             joined["has_lamp"] = joined["lamp_dist"] <= 40
             joined[["u", "v", "key", "has_lamp"]].to_csv(LAMP_CACHE, index=False)
             print(f"Saved lamp proximity cache: {LAMP_CACHE}")
-
+        # cereates a lookup dictionary and writes down if an edge has a lamp nearby or not, which we can then use to set the "has_lamp" attribute for each edge in the graph
             lamp_map = {
                 (row["u"], row["v"], row["key"]): bool(row["has_lamp"])
                 for _, row in joined.iterrows()
@@ -169,7 +170,7 @@ def load_graph_with_scores():
             data["has_lamp"] = bool(lamp_map.get((u, v, k), False))
 
         print("Lamp proximity computed successfully.")
-
+#error check
     except Exception as e:
         print(f"Lamp loading failed, defaulting has_lamp=False: {e}")
         for u, v, k, data in G.edges(keys=True, data=True):
@@ -181,9 +182,8 @@ def load_graph_with_scores():
 G = load_graph_with_scores()
  
  
-#Networkx pulls up this function to calculate the weight of each edge.
-# At night, edges without a nearby street lamp get a 50% risk surcharge to steer
-# the safe route towards lit streets.
+#Networkx pulls up this function to calculate the weight of each edge
+# At night, edges without a nearby street lamp get a 50% risk surcharge to steer the safe route towards lit streets
 def safe_weight_with_factor(u, v, data, factor=10.0, night_mode=False):
     #data is a dictionary of dicts because two nodes can have multiple edges between them
     edge_data = min(data.values(), key=lambda x: x.get("length", float("inf")))
@@ -193,7 +193,7 @@ def safe_weight_with_factor(u, v, data, factor=10.0, night_mode=False):
     if night_mode and not edge_data.get("has_lamp", False):
         risk = min(1.0, risk * 1.5)  # 50% risk boost for unlit edges at night
 
-    return length * (1 + factor * risk)  # factor adjustable via slider
+    return length * (1 + factor * risk)  # factor adjustable via slider in the app
  
  
 def get_routes(start, end, safety_factor=10.0):
@@ -222,10 +222,11 @@ def get_route_to_police(start):
     )
     if gdf_police.empty:
         return None, None
-    gdf_police["centroid"] = gdf_police.geometry.centroid
+    gdf_police["centroid"] = gdf_police.geometry.centroid #Center of police station, same reason as for parks etc. We need to measure distance here
     gdf_police["dist"] = gdf_police["centroid"].apply(
-        lambda p: ((p.y - start[0]) ** 2 + (p.x - start[1]) ** 2) ** 0.5
+        lambda p: ((p.y - start[0]) ** 2 + (p.x - start[1]) ** 2) ** 0.5 #sentence of pythagoras (satz des pythagoras, idk if thats the name in english)
     )
+    #changes route immediatly to nearest police station (endpoint and switches to fastest route)
     nearest = gdf_police.loc[gdf_police["dist"].idxmin()]
     police_point = (nearest["centroid"].y, nearest["centroid"].x)
     orig = ox.distance.nearest_nodes(G, start[1], start[0])
@@ -234,26 +235,26 @@ def get_route_to_police(start):
     route_gdf = ox.routing.route_to_gdf(G, route)
     return route_gdf, police_point
  
- 
+ #calculates total distance of a route in km 
 def route_distance_km(route_gdf):
     return route_gdf["length"].sum() / 1000.0
  
- 
+ #convert distance to walking time, 4.5 kmh is approcimation
 def distance_to_minutes(dist_km):
     return (dist_km / WALKING_SPEED_KMH) * 60
  
  
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600) #caches geocoding results for 1 hour to avoid hitting API limits and improve performance for repeated queries
 def geocode_address(address):
-    if not address or not address.strip():
+    if not address or not address.strip(): #if the input is not an adress skip
         return None
-    geolocator = Nominatim(user_agent="pathfinder_app")
-    # Bounding-Box für Zürich: SW- und NE-Ecke als (lat, lon)
+    geolocator = Nominatim(user_agent="pathfinder_app") #Nominatim is basically osm geocoding service that transforms adresses into geocoding. Obviously we used Claude to find out how to use it. We make a call via our user agent pathfinder_app to identify our app to prevent getting blocked by the service
+    # Bounding-Box for zurich to restrict the search area, because we had the issue that adresses ar eoften ambigous (Bahnhofstrasse, Zurich and Bahnhofstrasse Berlin). This way we dont have to use the city or postal codes but only the street and number
     lat_min, lat_max, lon_min, lon_max = ZURICH_BOUNDS
     viewbox = [(lat_min, lon_min), (lat_max, lon_max)]
  
     location = None
-    # 1) Direkt auf Zürich beschränkt suchen
+    # immediatly limit the search to zurich
     try:
         location = geolocator.geocode(
             address, viewbox=viewbox, bounded=True, country_codes="ch"
@@ -261,7 +262,7 @@ def geocode_address(address):
     except Exception:
         location = None
  
-    # 2) Fallback: Stadt explizit anhängen, falls nicht schon enthalten
+    # if in step one the user doesnt input a city, we append Zurich and try again, to make it faster to input for the user
     if location is None and "zürich" not in address.lower() and "zurich" not in address.lower():
         try:
             location = geolocator.geocode(
@@ -272,14 +273,16 @@ def geocode_address(address):
             location = None
  
     if location:
-        return (location.latitude, location.longitude)
+        return (location.latitude, location.longitude) #gives back the geocoding result as a tuple of (lat, lon) which we can then use for the routing and the map visualization
     return None
  
  
-# --------------------------- UI ---------------------------
+
+
+#Here starts the Frontend section. We used AI like Claude and ChatGPT heavily during this section, because none of us had knowledge about streamlit and web development prior to this project. Nevertheless we wanted to make this app easy to use, highly functional and visually appealing. The fastest way to achieve this was to use AI . Nevertheless, this was a learning process and we believe that we are now able to reproduce a large part of the following code with a few peaks into the code to help our memories. 
  
  
-st.title("Pathfinder – Safety Routing Zürich")
+st.title("Pathfinder - Safety Routing Zürich")
  
 map_tiles = "OpenStreetMap"
 legend_bg = "white"
@@ -304,18 +307,17 @@ if "show_safety_tips" not in st.session_state:
 if "geo_request" not in st.session_state:
     st.session_state.geo_request = None
  
-# Einheitliche Fehlermeldung für Punkte ausserhalb der Stadt Zürich
+# Error if point is out of bounds
 ZURICH_BOUNDS_ERROR = (
     "Der ausgewählte Punkt liegt ausserhalb der Stadt Zürich, "
     "bitte einen Start-und Endpunkt innerhalb der Stadtgrenzen wählen"
 )
  
-# ---- Sidebar: Anleitung → Route planen → Homeadresse → Einstellungen ----
+# manual for the sidebar to explain how to use the app (although it should be intuitive enough)
 with st.sidebar:
-    # 1. Anleitung
     st.header("Anleitung")
     st.write(
-        "Wähle **zwei Punkte direkt auf der Karte** – die Route wird automatisch berechnet."
+        "Wähle **zwei Punkte direkt auf der Karte** - die Route wird automatisch berechnet."
     )
     st.write(
         "**Oder** gib unter **Route planen** Start- und Zieladresse manuell ein und klicke auf *Route berechnen*."
@@ -323,7 +325,7 @@ with st.sidebar:
  
     st.divider()
  
-    # 2. Route planen
+    # Route inputs
     st.header("Route planen")
  
     # Prefill-Werte aus vorigem Run anwenden, BEVOR die Text-Inputs gerendert werden
@@ -337,13 +339,14 @@ with st.sidebar:
         placeholder="Adresse eingeben oder Karte klicken",
         key="start_addr_input",
     )
- 
+ #Start adress also viable via current location or home adress
     col_s1, col_s2 = st.columns(2)
     with col_s1:
         use_my_loc_start = st.button("Mein Standort", key="my_loc_start")
     with col_s2:
         use_home_start = st.button("Zuhause", key="home_start")
  
+ #same (beside current loc) for end address
     end_address = st.text_input(
         "Zieladresse",
         placeholder="Adresse eingeben",
@@ -356,6 +359,7 @@ with st.sidebar:
     with col_e2:
         use_home_end = st.button("Zuhause", key="home_end")
  
+ #if they try to calculate the route, but adresses cannot be found, or the points are out of bounds, they get an error message. If everything is fine, the points get stored in the session state and the route is calculated in the main section of the code
     if st.button("Route berechnen", type="primary", use_container_width=True):
         points = []
         out_of_bounds = False
@@ -390,24 +394,28 @@ with st.sidebar:
             st.session_state.emergency_mode = False
             st.rerun()
  
-    # ---- Zuhause als Start oder Ziel ----
+    #error if no home adress is entered, but tried to insert home adress as start or endpoint
     def _set_home_point(slot):
         """slot: 0 = Start, 1 = Ziel"""
         if not user_settings.get("home_lat"):
             st.warning("Bitte zuerst Home-Adresse speichern.")
             return
         home_pt = (user_settings["home_lat"], user_settings["home_lon"])
+        #error if home is oob
         if not is_in_zurich(home_pt[0], home_pt[1]):
             st.error(ZURICH_BOUNDS_ERROR)
             return
+        
         pts = list(st.session_state.points)
         other_slot = 1 - slot
+        #checks if both adresses use home which doesnt make sense
         if len(pts) > other_slot and pts[other_slot] == home_pt:
             st.error("Start- und Zielpunkt sind identisch - bitte einen anderen Punkt wählen")
             return
         while len(pts) <= slot:
             pts.append(home_pt)
         pts[slot] = home_pt
+        #makes sure there are only two points
         st.session_state.points = pts[:2]
         # Adressfeld vorbefüllen (wird beim nächsten Run vor dem Text-Input gesetzt)
         home_addr_str = user_settings.get("home_address", "")
@@ -421,7 +429,7 @@ with st.sidebar:
     if use_home_end:
         _set_home_point(1)
  
-    # ---- "Mein Standort"-Buttons setzen Anfrage-Flag ----
+    # same for current location, but without the prefill step and with error if location cannot be retrieved 
     if use_my_loc_start:
         st.session_state.geo_request = "start"
         st.rerun()
@@ -441,7 +449,8 @@ with st.sidebar:
  
     st.divider()
  
-    emergency = st.button("NOTFALL – Nächste Polizeistation", type="primary", use_container_width=True)
+ #This uses the police stattion search we implemented earlier as a function. Allows us to implement an emergeny button, for example if the user gets followed or feels unsafe, they can click this button and get the location for the next police station. Could be further expanded with a call to the respective police station
+    emergency = st.button("NOTFALL - Nächste Polizeistation", type="primary", use_container_width=True)
     if emergency:
         if len(st.session_state.points) >= 1:
             with st.spinner("Suche nächste Polizeistation..."):
@@ -452,22 +461,19 @@ with st.sidebar:
                         st.session_state.emergency_route = eroute
                         st.session_state.emergency_police_point = epoint
                         st.rerun()
-                    else:
+                    else: #Ideally this error shouldnt happen
                         st.error("Keine Polizeistation in der Nähe gefunden.")
                 except Exception:
                     st.error("Fehler bei der Suche. Bitte versuche es erneut.")
-        else:
+        else: #Ideally this takes your location as starting point but it makes problems when implementing this, because most of the timee we are not in zurich, resulting in error while testing
             st.warning("Bitte zuerst einen Standort setzen (Startpunkt).")
- 
-    # Platzhalter für den Routenvergleich – wird gefüllt sobald eine Route berechnet wurde
+
     routenvergleich_container = st.container()
  
     st.divider()
- 
-    # 3. Homeadresse
+ #home adress input (not the button where you apply the stored input into the start/endpoint but the section where the user actualkly sets his home adress)
     st.header("Homeadresse")
  
-    # Prefill anwenden, bevor das Text-Input gerendert wird (z.B. nach Reset)
     if "_prefill_home" in st.session_state:
         st.session_state["home_addr_input"] = st.session_state.pop("_prefill_home")
  
@@ -483,7 +489,7 @@ with st.sidebar:
         save_home_clicked = st.button("Adresse speichern", use_container_width=True)
     with home_col2:
         reset_home_clicked = st.button("Reset", use_container_width=True, key="home_reset_btn")
- 
+ #same logic as above, with oob errors, this one also stores the home adress for later use after opening the app again
     if save_home_clicked:
         coords = geocode_address(home_addr)
         if coords:
@@ -508,9 +514,10 @@ with st.sidebar:
  
     st.divider()
  
-    # 4. Einstellungen
+    # different settings for the route calculation, like how much safety should be weighted and whether the user wants to see the fastest and/or safest route. We hide the sliders values and tooltips via CSS to make it look cleaner, because the exact values dont matter that much for the user and it would just add complexity to the interface. The user can just move the slider until they find a good balance between safety and duration for their personal preferences
     with st.expander("Einstellungen", expanded=False):
-        # CSS um die Min/Max-Werte und Slider-Tooltips auszublenden
+        # css to hide slider and tooltips values
+        #html code we got from Claude
         st.markdown(
             """
             <style>
@@ -521,7 +528,7 @@ with st.sidebar:
             """,
             unsafe_allow_html=True,
         )
- 
+    
         def _qual_slider(label, key):
             st.markdown(f"**{label}**")
             val = st.slider(
@@ -536,7 +543,7 @@ with st.sidebar:
             )
             return val
  
-        # 1–10 (Slider) → in interne Wertebereiche umrechnen
+        #slider normalized to 1-10 for better usage, but actual safety weight uses 1 to 30
         sw_level = _qual_slider("Sicherheitsgewichtung", key="sw_slider")
         safety_weight = 1.0 + (sw_level - 1) * (29.0 / 9.0)  # 1–10 → 1.0–30.0
  
@@ -546,7 +553,8 @@ with st.sidebar:
         show_fastest = st.toggle("Schnellste Route anzeigen", value=True)
         show_safest = st.toggle("Sicherste Route anzeigen", value=True)
  
-# ---- Geolocation: Browser-Standort abrufen, wenn angefordert ----
+#This is a bit tricky: This section is supposed to call the location of the user. It works... most of the time when  in zurich. It makes problems on mac with not even asking for the location. Windows works sometimes. iPhone did work reliable in the past for me, but hard to test when in St Gallen and not Zurich. 
+#The user location part was made with the help of Claude, because I have no experience with GPS requests in web apps. The main problem is that the location request is asynchronous and can take some time, so we need to use a flag in the session state to trigger the location request and then handle the result when it comes back. We also need to handle the case where the user denies the location request or if there is an error in getting the location. The code below checks for the flag, gets the location, checks if it's valid and within Zurich, and then updates the points accordingly. If there are any issues, it shows appropriate error messages
 if st.session_state.geo_request:
     loc = get_geolocation()
     if loc and isinstance(loc, dict) and loc.get("coords"):
@@ -574,8 +582,7 @@ if st.session_state.geo_request:
     else:
         st.info("Standort wird abgefragt... Bitte im Browser erlauben.")
  
-# ---- Main Map ----
-# Zoom beibehalten nach Auswahl von Startpunkt: map centers on the route midpoint when both points are set
+# Keep zoom after selection of one point via map click. Also map centers on the route midpoint when both points are set
 if len(st.session_state.points) == 2:
     map_center = [
         (st.session_state.points[0][0] + st.session_state.points[1][0]) / 2,
@@ -600,7 +607,7 @@ for i, point in enumerate(st.session_state.points):
         location=point, tooltip=label, icon=folium.Icon(color=color)
     ).add_to(m)
  
-# ---- Dauerhafter Zuhause-Marker, falls eine Home-Adresse gespeichert ist ----
+# sets a permanenent home marker if home adress is set
 home_saved = user_settings.get("home_lat") is not None and user_settings.get("home_lon") is not None
 if home_saved:
     folium.Marker(
@@ -609,7 +616,7 @@ if home_saved:
         icon=folium.Icon(color="purple", icon="home", prefix="fa"),
     ).add_to(m)
  
-# ---- Legende als HTML-Overlay direkt auf der Karte ----
+# the legend is a permanent html overlay on map
 in_emergency = st.session_state.emergency_mode and st.session_state.emergency_route is not None
 emergency_legend = (
     '<span style="background:#ff4136; width:22px; height:4px; display:inline-block; vertical-align:middle; margin-right:6px;"></span>Notfall-Route<br>'
@@ -641,7 +648,7 @@ route_normal_gdf = None
 route_safe_gdf = None
 emergency_info = None
 route_info = None
- 
+ #in safety mode use a nice little marker for police station
 if st.session_state.emergency_mode and st.session_state.emergency_route is not None:
     eroute = st.session_state.emergency_route
  
@@ -664,7 +671,7 @@ if st.session_state.emergency_mode and st.session_state.emergency_route is not N
     # Notfall-Info unterhalb der Karte
     st.warning(
         f"NOTFALL-ROUTE zur nächsten Polizeistation: "
-        f"{dist_km:.2f} km / ca. {dur_min:.0f} Min. zu Fuss"
+        f"{dist_km:.2f} km / ca. {dur_min:.0f} Min. zu Fuss" #also show the walking duration and distance to make appropriate decisions in an emergency situation
     )
  
 elif len(st.session_state.points) == 2:
@@ -680,9 +687,9 @@ elif len(st.session_state.points) == 2:
  
     extra_pct = ((dist_safe - dist_normal) / dist_normal * 100) if dist_normal > 0 else 0
  
-    # Nachtmodus-Hinweis: zeige Banner wenn Lampen-Routing aktiv ist
+    # If night mode is active we use the official zurich lamp dataset, which will be indicated in the app to make the user aware that we focus on illuminated areas
     if is_currently_night:
-        st.info("🌙 Nachtmodus aktiv – unbeleuchtete Strassen werden stärker gemieden.")
+        st.info("🌙 Nachtmodus aktiv - unbeleuchtete Strassen werden stärker gemieden.")
  
     #Draw the routes on the map, blue for shortest and green for safest
     if show_fastest:
@@ -697,7 +704,7 @@ elif len(st.session_state.points) == 2:
  
     map_data = st_folium(m, width=900, height=600, returned_objects=["last_clicked", "zoom", "center"])
  
-    # ---- Infos UNTER der Karte ----
+    #shows the discrepency in duration of fastest and safest route
     if extra_pct > extra_distance and extra_distance > 0:
         st.info(
             f"Die sicherste Route ist {extra_pct:.0f}% länger als die kürzeste. "
@@ -712,7 +719,7 @@ elif len(st.session_state.points) == 2:
     with col3:
         st.metric("Umweg", f"+{extra_pct:.0f}%", f"+{dur_safe - dur_normal:.0f} Min.")
  
-    # ---- Routenvergleich (in Sidebar-Container, zwischen Route planen und Einstellungen) ----
+    # gives insights on the actual safety scores of the routes
     scores_df = pd.read_csv(PROCESSED_DIR / "zurich_safety_scores.csv")
  
     def get_route_stats(route_gdf):
@@ -730,33 +737,34 @@ elif len(st.session_state.points) == 2:
  
     with routenvergleich_container:
         st.header("Routenvergleich")
-        st.metric("Safety Score – Kürzeste", f"{normal_score:.2f}")
+        st.metric("Safety Score - Kürzeste", f"{normal_score:.2f}")
         st.metric(
-            "Safety Score – Sicherste", f"{safe_score:.2f}",
+            "Safety Score - Sicherste", f"{safe_score:.2f}",
             delta=f"{safe_score - normal_score:+.2f}",
         )
  
-    # ---- Info-Buttons: Reroute-Begründung und Safety-Tipps ----
+    # We originally wanted to test whether it makes sense if a a route is "unsafe" or not so we showed the reasons for avoiding a route. Now its a nice addon users can see. If they dont care about some features, they might take the faster route. 
     btn_col1, btn_col2 = st.columns(2)
     with btn_col1:
         if st.button("Warum wurde die Route umgeleitet?", use_container_width=True):
             st.session_state.show_info = not st.session_state.show_info
     with btn_col2:
-        if st.button("Sicher nach Hause – Tipps", use_container_width=True):
+        if st.button("Sicher nach Hause - Tipps", use_container_width=True):
             st.session_state.show_safety_tips = not st.session_state.show_safety_tips
  
+ #This was a suggestion from chatgpt to include tips on how to get home safe. We thought its a nice little addon especially if its just a small expandable section at the bottom and doesnt annoy. Its very generic and the info should be common knowledge, but why not
     if st.session_state.show_safety_tips:
         with st.expander("Verhaltensregeln für eine sichere Heimreise", expanded=True):
             st.markdown(
                 """
                 - **Grössere Personengruppen meiden** und nicht durch sie hindurchgehen
-                - **Nicht von Fremden ansprechen lassen** – freundlich, aber bestimmt weitergehen
+                - **Nicht von Fremden ansprechen lassen** - freundlich, aber bestimmt weitergehen
                 - **Kopfhörer leise** lassen oder ganz abnehmen, um die Umgebung wahrzunehmen
                 - **Hauptstrassen und beleuchtete Wege** bevorzugen, dunkle Abkürzungen meiden
                 - **Wertgegenstände** (Handy, Schmuck, Portemonnaie) nicht offen tragen
                 - **Handy aufgeladen** und mit etwas Akku-Reserve dabeihaben
                 - **Vertrauensperson informieren** über Route und voraussichtliche Ankunftszeit
-                - **Selbstsicher gehen** – aufrechte Haltung, zielgerichteter Blick
+                - **Selbstsicher gehen** - aufrechte Haltung, zielgerichteter Blick
                 - **Im Zweifel** in ein offenes Geschäft, Restaurant oder zur Polizei gehen
                 - **Notrufnummer 117** (Polizei) griffbereit halten
                 - Wenn dir jemand folgt: **Strassenseite wechseln** oder Umweg über belebte Gegend nehmen
@@ -766,6 +774,7 @@ elif len(st.session_state.points) == 2:
  
     if st.session_state.show_info:
         # Pro Feature: ("more on safe"-Phrase, "less on safe"-Phrase)
+        #The problem is that we had to rephrase them otherwise it sounds weird and isnt grammatically correct because its something like "More less tunnels on safe route (Which is stupid)
         feature_phrases = {
             "is_tunnel":         ("Mehr Tunnel",                   "Weniger Tunnel"),
             "is_bridge":         ("Mehr Brücken",                  "Weniger Brücken"),
@@ -778,11 +787,12 @@ elif len(st.session_state.points) == 2:
             "is_oneway":         ("Mehr Einbahnstrassen",          "Weniger Einbahnstrassen"),
             "has_sidewalk":      ("Mehr Gehweg",                   "Weniger Gehweg"),
         }
+        #show lamps as feature during night. IMPORTANT: Is_lit and lamps is not the same. Is lit is only osm and less accurate for zurich and includes not only lanterns. lamps isnt in the ML set but is hardcoded with a certain factor. We use this data from the city of zurich
         if is_currently_night:
             feature_phrases["has_lamp"] = ("Mehr beleuchtete Strassen", "Weniger beleuchtete Strassen")
  
         edge_feats = pd.read_csv(PROCESSED_DIR / "zurich_edge_features.csv")
- 
+ # calculates the mean of the features for the given route, which we then use to compare the two routes and find out why the safe route is safer. We compare the features of the edges in the route with the overall feature scores we have from our dataset to find out which features are more present in the safe route compared to the normal route. The top differences are then shown as reasons for the route being safer or less safe
         def get_edge_feature_means(route_gdf):
             merged = route_gdf.reset_index()
             if "u" in merged.columns and "v" in merged.columns:
@@ -794,11 +804,11 @@ elif len(st.session_state.points) == 2:
         normal_feats = get_edge_feature_means(route_normal_gdf)
         safe_feats = get_edge_feature_means(route_safe_gdf)
  
-        # diff > 0: sichere Route hat MEHR davon, diff < 0: sichere Route hat WENIGER davon
+        
         diff = safe_feats - normal_feats
         threshold = 0.01
  
-        # Top-Unterschiede nach Betrag sortieren
+        # Sort top differences by abs value
         top = diff.abs().sort_values(ascending=False).head(5)
  
         reasons = []
@@ -809,9 +819,9 @@ elif len(st.session_state.points) == 2:
             more_phrase, less_phrase = feature_phrases.get(feat, (feat, feat))
             reasons.append(more_phrase if val > 0 else less_phrase)
  
-        with st.expander("Routenanalyse – Gründe für die Umleitung", expanded=True):
+        with st.expander("Routenanalyse - Gründe für die Umleitung", expanded=True):
             if not reasons:
-                st.write("Die Routen sind sehr ähnlich – kaum Unterschied.")
+                st.write("Die Routen sind sehr ähnlich - kaum Unterschied.")
             else:
                 st.markdown("**Die Route wurde umgeleitet, da:**")
                 for r in reasons:
@@ -820,7 +830,7 @@ elif len(st.session_state.points) == 2:
 else:
     map_data = st_folium(m, width=900, height=600, returned_objects=["last_clicked", "zoom", "center"])
  
-# Klick handler – 1. Klick = Start, ab 2. Klick = Ziel (wird bei jedem weiteren Klick aktualisiert)
+# click handler for the map, allows to set start and endpoints via clicking on the map. Also checks if the clicked point is within zurich and shows an error if not. The logic is as follows: First click sets the start point, second click sets the endpoint, from third click onwards the endpoint gets updated while the start point remains the same. This allows users to easily adjust their destination without having to reset everything
 if map_data and map_data.get("last_clicked"):
     clicked = (map_data["last_clicked"]["lat"], map_data["last_clicked"]["lng"])
     if not is_in_zurich(clicked[0], clicked[1]):
@@ -837,7 +847,7 @@ if map_data and map_data.get("last_clicked"):
                 st.session_state.points = pts
                 st.rerun()
         else:
-            # Ab 3. Klick: Zielpunkt aktualisieren, Startpunkt bleibt
+            # After third click: Reset endpoint while start remains the same
             if clicked != pts[1]:
                 pts[1] = clicked
                 st.session_state.points = pts
